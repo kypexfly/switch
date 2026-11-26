@@ -23,7 +23,7 @@ use crate::format::{self, Severity, Tone};
 use crate::icons;
 use crate::launch_at_login;
 use crate::notify;
-use crate::preferences::{self, AccountScope, Preferences, ResetTrigger, WindowScope};
+use crate::preferences::{self, AccountScope, Preferences, ResetTrigger, UsageShown, WindowScope};
 use crate::reorder::{self, List, Reorder};
 use crate::settings::{self, Page};
 
@@ -625,6 +625,8 @@ impl Panel {
             "notify-windows:all" => self.edit_preferences(|all| all.notifications.windows = WindowScope::All),
             "notify-accounts:all" => self.edit_preferences(|all| all.notifications.accounts = AccountScope::All),
             "notify-accounts:active" => self.edit_preferences(|all| all.notifications.accounts = AccountScope::Active),
+            "usage-shown:used" => self.edit_preferences(|all| all.usage_shown = UsageShown::Used),
+            "usage-shown:left" => self.edit_preferences(|all| all.usage_shown = UsageShown::Left),
             "quit" => {
                 if let Some(actions) = &self.actions {
                     actions.handle.quit();
@@ -704,6 +706,14 @@ impl Palette {
             Tone::Muted => self.secondary,
             Tone::Warning => self.warning,
             Tone::Danger => self.danger,
+        }
+    }
+
+    fn severity(&self, used: f64, normal: Color) -> Color {
+        match format::severity(used) {
+            Severity::Normal => normal,
+            Severity::Warning => self.warning,
+            Severity::Danger => self.danger,
         }
     }
 }
@@ -1279,47 +1289,70 @@ fn switch_button(account: &Account, failed: bool, panel: &Panel, palette: &Palet
     button.on_press_tx(move |panel: &mut Panel, _| panel.activate(id.clone()))
 }
 
-fn usage_row(window: &UsageWindow, current: bool, panel: &Panel, palette: &Palette) -> El {
-    let used = window.used_percent.filter(|used| used.is_finite()).map(|used| used.clamp(0.0, 100.0));
-    let mut bar = row()
-        .grow(1.0)
-        .min_w(0.0)
-        .h(6.0)
-        .radius(3.0)
-        .fill(palette.track)
-        .opacity(if current { 1.0 } else { DIMMED })
-        .role("progressbar")
-        .label(format!("{} used", window.label));
-    if let Some(used) = used {
-        bar = bar.range_value(used, 0.0, 100.0);
-        let color = match format::severity(used) {
-            Severity::Normal => palette.accent,
-            Severity::Warning => palette.warning,
-            Severity::Danger => palette.danger,
-        };
-        if used > 0.0 {
-            bar = bar.child(el().w_frac((used / 100.0) as f32).min_w(6.0).h_full().radius(3.0).fill(color));
+struct Meter<'a> {
+    window: &'a UsageWindow,
+    used: Option<f64>,
+    shown: Option<f64>,
+    left: bool,
+    opacity: f32,
+}
+
+impl Meter<'_> {
+    fn amount(&self) -> &'static str {
+        if self.left { "left" } else { "used" }
+    }
+
+    fn progress(&self, meter: El) -> El {
+        let meter = meter.role("progressbar").label(format!("{} {}", self.window.label, self.amount()));
+        match self.shown {
+            Some(shown) => meter.range_value(shown, 0.0, 100.0),
+            None => meter,
         }
     }
-    if let Some(pace) = format::pace(window, panel.now) {
-        bar = bar.child(
-            row()
-                .pin(Some(0.0), Some(-2.0), Some(0.0), Some(-2.0))
-                .child(el().w_frac(pace as f32).h_full())
-                .child(el().w(2.0).ml(-1.0).h_full().radius(1.0).fill(palette.pace)),
-        );
+
+    fn pace(&self, panel: &Panel) -> Option<f64> {
+        format::pace(self.window, panel.now).map(|pace| if self.left { 1.0 - pace } else { pace })
     }
-    let reset = format::reset_time(window, panel.now, &panel.zone, panel.exact_resets)
-        .or_else(|| used.is_none().then(|| "No data".to_owned()))
+}
+
+fn usage_row(window: &UsageWindow, current: bool, panel: &Panel, palette: &Palette) -> El {
+    let used = window.used_percent.filter(|used| used.is_finite()).map(|used| used.clamp(0.0, 100.0));
+    let left = panel.preferences.usage_shown == UsageShown::Left;
+    let shown = used.map(|used| if left { 100.0 - used } else { used });
+    let meter = Meter { window, used, shown, left, opacity: if current { 1.0 } else { DIMMED } };
+    bar_row(&meter, panel, palette)
+}
+
+fn pace_tick(pace: f64, palette: &Palette) -> El {
+    row()
+        .pin(Some(0.0), Some(-2.0), Some(0.0), Some(-2.0))
+        .child(el().w_frac(pace as f32).h_full())
+        .child(el().w(2.0).ml(-1.0).h_full().radius(1.0).fill(palette.pace))
+}
+
+fn bar_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
+    let mut bar =
+        meter.progress(row().grow(1.0).min_w(0.0).h(6.0).radius(3.0).fill(palette.track).opacity(meter.opacity));
+    if let (Some(used), Some(shown)) = (meter.used, meter.shown)
+        && shown > 0.0
+    {
+        let color = palette.severity(used, palette.accent);
+        bar = bar.child(el().w_frac((shown / 100.0) as f32).min_w(6.0).h_full().radius(3.0).fill(color));
+    }
+    if let Some(pace) = meter.pace(panel) {
+        bar = bar.child(pace_tick(pace, palette));
+    }
+    let reset = format::reset_time(meter.window, panel.now, &panel.zone, panel.exact_resets)
+        .or_else(|| meter.used.is_none().then(|| "No data".to_owned()))
         .unwrap_or_default();
-    let percent_color = if used.is_some() { palette.text } else { palette.secondary };
+    let percent_color = if meter.used.is_some() { palette.text } else { palette.secondary };
     row()
         .h(20.0)
         .gap(8.0)
         .center_y()
-        .child(text(&window.label).font(BODY).color(palette.secondary).truncate().w(64.0))
+        .child(text(&meter.window.label).font(BODY).color(palette.secondary).truncate().w(64.0))
         .child(bar)
-        .child(right(36.0, text(format::percent(used)).font(PERCENT).color(percent_color).nowrap()))
+        .child(right(36.0, text(format::percent(meter.shown)).font(PERCENT).color(percent_color).nowrap()))
         .child(right(74.0, text(reset).font(RESET).color(palette.secondary).nowrap()))
 }
 
@@ -1593,5 +1626,13 @@ mod tests {
         assert_eq!(panel.preferences.notifications.accounts, AccountScope::Active);
         assert!(panel.go_back());
         assert_eq!(panel.page, Page::Settings);
+    }
+
+    #[test]
+    fn usage_display_menus_work_while_offline() {
+        let mut panel = on_page(Page::Settings);
+        panel.apply(Update::Lost("gone".into()));
+        panel.on_menu("usage-shown:left");
+        assert_eq!(panel.preferences.usage_shown, UsageShown::Left);
     }
 }

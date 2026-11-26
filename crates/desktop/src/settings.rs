@@ -7,7 +7,9 @@ use crate::panel::{
     BODY, DISABLED, Look, NAME, Palette, Panel, Prompt, SECTION, SMALL, Task, button, cancel, disable,
     dismissible_notice, drag_handle, empty, movable, note, notice, remove_button, sign_in_button, sign_in_hint, toggle,
 };
-use crate::preferences::{AccountScope, NotificationPreferences, Place, ResetTrigger, WindowScope, provider_windows};
+use crate::preferences::{
+    AccountScope, NotificationPreferences, Place, ResetTrigger, UsageShown, WindowScope, provider_windows,
+};
 use crate::reorder::List;
 use crate::status::{self, TrayGroup};
 
@@ -122,9 +124,29 @@ fn list(panel: &Panel, snapshot: &Snapshot, palette: &Palette) -> Vec<El> {
         )));
         items
     };
+    items.push(usage_display(panel, palette));
     items.push(auto_switch_row(snapshot, palette));
     items.push(app_settings(panel, palette));
     items
+}
+
+fn usage_shown_label(shown: UsageShown) -> &'static str {
+    match shown {
+        UsageShown::Used => "Used",
+        UsageShown::Left => "Left",
+    }
+}
+
+fn usage_display(panel: &Panel, palette: &Palette) -> El {
+    let shown = panel.preferences.usage_shown;
+    let shown_button =
+        menu_button("usage-shown", usage_shown_label(shown), "Show usage as", true, palette, move || {
+            let item = |id: &str, choice: UsageShown| {
+                PopupItem::new(format!("usage-shown:{id}"), usage_shown_label(choice)).checked(shown == choice)
+            };
+            PopupMenu::new().item(item("used", UsageShown::Used)).item(item("left", UsageShown::Left))
+        });
+    group(palette).child(setting("Show usage as", shown_button, palette))
 }
 
 fn auto_switch_row(snapshot: &Snapshot, palette: &Palette) -> El {

@@ -33,6 +33,14 @@ pub enum AccountScope {
     Active,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageShown {
+    #[default]
+    Used,
+    Left,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationPreferences {
@@ -120,6 +128,7 @@ pub struct Preferences {
     tray_windows: BTreeMap<String, Vec<String>>,
     #[serde(deserialize_with = "deserialize_notifications")]
     pub notifications: NotificationPreferences,
+    pub usage_shown: UsageShown,
 }
 
 impl Preferences {
@@ -370,6 +379,22 @@ mod tests {
         preferences.notifications.accounts = AccountScope::Active;
         preferences.notifications.set_account("a2", false);
         save(&path, &preferences).unwrap();
+        assert_eq!(load(&path).unwrap(), preferences);
+    }
+
+    #[test]
+    fn usage_shown_defaults_to_used_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path(dir.path());
+        fs::write(&path, r#"{"notifications": true}"#).unwrap();
+        assert_eq!(load(&path).unwrap().usage_shown, UsageShown::Used);
+
+        fs::write(&path, r#"{"usage_shown": "left"}"#).unwrap();
+        assert_eq!(load(&path).unwrap().usage_shown, UsageShown::Left);
+
+        let preferences = Preferences { usage_shown: UsageShown::Left, ..Preferences::default() };
+        save(&path, &preferences).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains(r#""usage_shown": "left""#));
         assert_eq!(load(&path).unwrap(), preferences);
     }
 }

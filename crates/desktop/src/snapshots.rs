@@ -5,7 +5,7 @@ use rune::App;
 use crate::connection::Update;
 use crate::fixtures;
 use crate::panel::{Panel, Prompt, Task};
-use crate::preferences::{Place, Preferences};
+use crate::preferences::{Place, Preferences, UsageShown};
 use crate::reorder::{List, Reorder};
 use crate::settings::Page;
 use crate::status::{self, TrayColumn, TrayGroup};
@@ -52,6 +52,18 @@ fn viewport_height(tree: &str) -> f32 {
     let numbers = &tree[start..];
     let numbers = &numbers[numbers.find('[').unwrap() + 1..numbers.find(']').unwrap()];
     numbers.split(',').nth(1).unwrap().trim().parse().unwrap()
+}
+
+fn showcase(shown: UsageShown) -> Panel {
+    let mut snapshot = fixtures::showcase();
+    let accounts = &mut snapshot.providers[0].accounts;
+    let weekly = &mut accounts[0].usage.as_mut().unwrap().windows[1];
+    weekly.resets_at = Some(fixtures::now() + jiff::SignedDuration::from_hours(13 * 24 + 13));
+    weekly.period_seconds = Some(30 * 86400);
+    accounts[2].usage.as_mut().unwrap().windows[0].used_percent = None;
+    let mut panel = panel(Some(snapshot));
+    panel.preferences.usage_shown = shown;
+    panel
 }
 
 fn lost(snapshot: Option<switch_protocol::Snapshot>) -> Panel {
@@ -321,6 +333,7 @@ fn render_snapshots() {
         );
         snap(&dir, "scrolling", || Panel { max_height: 360.0, ..panel(Some(fixtures::several_accounts())) }, dark);
         snap(&dir, "showcase", || panel(Some(fixtures::showcase())), dark);
+        snap(&dir, "showcase-bars-left", || showcase(UsageShown::Left), dark);
         snap(&dir, "resets-collapsed", || panel(Some(fixtures::with_resets())), dark);
         snap(
             &dir,
