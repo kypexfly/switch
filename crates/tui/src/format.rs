@@ -62,7 +62,7 @@ pub fn reset_time(window: &UsageWindow, now: Timestamp, zone: &TimeZone, exact: 
     } else if seconds < 6 * 86_400 {
         "%a %H:%M"
     } else {
-        "%b %-d"
+        "%b %-d %H:%M"
     };
     format!("resets {}", local.strftime(fmt))
 }
@@ -175,7 +175,7 @@ mod tests {
         };
         assert_eq!(exact(103), "resets 08:43");
         assert_eq!(exact(20 * 60), "resets Wed 03:00");
-        assert_eq!(exact(7 * 24 * 60), "resets Dec 1");
+        assert_eq!(exact(7 * 24 * 60), "resets Dec 1 07:00");
     }
 
     #[test]

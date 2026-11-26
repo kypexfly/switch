@@ -56,7 +56,7 @@ pub fn reset_time(window: &UsageWindow, now: Timestamp, zone: &TimeZone, exact: 
     } else if seconds < 6 * 86400 {
         "%a %H:%M"
     } else {
-        "%b %-d"
+        "%b %-d %H:%M"
     };
     Some(local.strftime(format).to_string())
 }
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(reset_time(&session(10.0, 103), now, &zone, false).unwrap(), "1h 43m");
         assert_eq!(exact(103), "08:43");
         assert_eq!(exact(20 * 60), "Wed 03:00");
-        assert_eq!(exact(7 * 24 * 60), "Dec 1");
+        assert_eq!(exact(7 * 24 * 60), "Dec 1 07:00");
     }
 
     #[test]

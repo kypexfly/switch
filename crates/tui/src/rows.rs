@@ -12,7 +12,7 @@ use crate::model::{Connection, Model, Target, has_own_row};
 const INDENT: usize = 4;
 const GAP: &str = "  ";
 const PERCENT_WIDTH: usize = 4;
-const RESET_WIDTH: usize = 18;
+const RESET_WIDTH: usize = 19;
 const WINDOW_LABEL_MAX: usize = 16;
 const BAR_MIN: usize = 6;
 const BAR_MAX: usize = 36;
