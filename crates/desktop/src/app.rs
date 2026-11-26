@@ -185,23 +185,24 @@ pub fn run() {
     let client = SharedClient::default();
 
     let tray_handle = handle.clone();
-    let tray = TrayController::new(move |event| match event {
-        TrayEvent::Activate { .. } => toggle(&tray_handle),
-        TrayEvent::Menu(id) => tray_handle.update(move |panel, _| panel.on_menu(&id)),
-        _ => {}
-    });
-    let tray = match tray {
-        Ok(tray) => tray,
-        Err(error) => {
-            eprintln!("switch-desktop: could not add the menu bar item: {error}");
-            return;
-        }
-    };
     let preferences_path = preferences::path(&switch_client::home_dir());
     let preferences = preferences::load(&preferences_path);
     let launch_at_login = launch_at_login::enabled();
     let actions = Actions { client: client.clone(), handle: handle.clone() };
-    handle.update(move |panel, _| {
+    handle.update(move |panel, tx| {
+        let tray = TrayController::new(move |event| match event {
+            TrayEvent::Activate { .. } => toggle(&tray_handle),
+            TrayEvent::Menu(id) => tray_handle.update(move |panel, _| panel.on_menu(&id)),
+            _ => {}
+        });
+        let tray = match tray {
+            Ok(tray) => tray,
+            Err(error) => {
+                eprintln!("switch-desktop: could not add the menu bar item: {error}");
+                tx.quit();
+                return;
+            }
+        };
         panel.tray = Some(tray);
         panel.actions = Some(actions);
         panel.launch_at_login = launch_at_login;
