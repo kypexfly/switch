@@ -23,7 +23,7 @@ use crate::format::{self, Severity, Tone};
 use crate::icons;
 use crate::launch_at_login;
 use crate::notify;
-use crate::preferences::{self, Preferences};
+use crate::preferences::{self, AccountScope, Preferences, ResetTrigger, WindowScope};
 use crate::reorder::{self, List, Reorder};
 use crate::settings::{self, Page};
 
@@ -127,12 +127,12 @@ impl Panel {
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::Snapshot(snapshot) => {
-                if self.preferences.notifications
+                if self.preferences.notifications.enabled
                     && self.actions.is_some()
                     && let Some(previous) = &self.snapshot
                 {
-                    for notification in notify::detect(previous, &snapshot) {
-                        notify::send(&notification);
+                    for notification in notify::detect(previous, &snapshot, &self.preferences.notifications) {
+                        notify::send(&notification, self.preferences.notifications.sound);
                     }
                 }
                 self.snapshot = Some(snapshot);
@@ -160,7 +160,7 @@ impl Panel {
                     }
                 }
                 let gone = match &self.page {
-                    Page::Usage | Page::Settings | Page::AutoSwitch => false,
+                    Page::Usage | Page::Settings | Page::AutoSwitch | Page::Notifications => false,
                     Page::Provider(id) => self.provider(id).is_none(),
                     Page::Account(id) => self.account(id).is_none(),
                 };
@@ -191,7 +191,7 @@ impl Panel {
             }
             Err(error) => self.preferences_error = Some(format!("Changes here won't be kept: {error:#}")),
         }
-        if self.actions.is_some() && self.preferences.notifications {
+        if self.actions.is_some() && self.preferences.notifications.enabled {
             notify::prepare();
         }
         self.sync_tray();
@@ -207,9 +207,15 @@ impl Panel {
     }
 
     pub fn set_notifications(&mut self, on: bool) {
-        self.edit_preferences(|all| all.notifications = on);
+        self.edit_preferences(|all| all.notifications.enabled = on);
         if on && self.actions.is_some() {
             notify::prepare();
+        }
+    }
+
+    pub fn send_test_notification(&self) {
+        if self.actions.is_some() && self.preferences.notifications.enabled {
+            notify::send(&notify::test_notification(), self.preferences.notifications.sound);
         }
     }
 
@@ -247,7 +253,7 @@ impl Panel {
         match self.page {
             Page::Usage => return false,
             Page::Settings => self.open(Page::Usage),
-            Page::AutoSwitch | Page::Provider(_) | Page::Account(_) => self.open(Page::Settings),
+            Page::AutoSwitch | Page::Notifications | Page::Provider(_) | Page::Account(_) => self.open(Page::Settings),
         }
         true
     }
@@ -611,6 +617,14 @@ impl Panel {
             "settings" => self.open(Page::Settings),
             "strategy:best" => self.set_strategy(Strategy::Best),
             "strategy:next" => self.set_strategy(Strategy::Next),
+            "notify-reset:exhausted" => {
+                self.edit_preferences(|all| all.notifications.reset_trigger = ResetTrigger::Exhausted)
+            }
+            "notify-reset:any" => self.edit_preferences(|all| all.notifications.reset_trigger = ResetTrigger::Any),
+            "notify-windows:primary" => self.edit_preferences(|all| all.notifications.windows = WindowScope::Primary),
+            "notify-windows:all" => self.edit_preferences(|all| all.notifications.windows = WindowScope::All),
+            "notify-accounts:all" => self.edit_preferences(|all| all.notifications.accounts = AccountScope::All),
+            "notify-accounts:active" => self.edit_preferences(|all| all.notifications.accounts = AccountScope::Active),
             "quit" => {
                 if let Some(actions) = &self.actions {
                     actions.handle.quit();
@@ -1033,8 +1047,9 @@ fn account_row(account: &Account, provider: &ProviderState, panel: &Panel, palet
         .label(if account.active { format!("{}, active", account.label()) } else { account.label().to_owned() })
         .on_secondary_press(move |_: &mut Panel, press, tx| {
             let id = id.clone();
-            tx.popup_menu(account_menu(enabled, switchable, connected), press, move |panel: &mut Panel, picked, _| {
+            tx.popup_menu(account_menu(enabled, switchable, connected), press, move |panel: &mut Panel, picked, tx| {
                 if let Some(picked) = picked {
+                    tx.animated();
                     panel.on_account_menu(id, picked);
                 }
             });
@@ -1405,8 +1420,9 @@ fn more(threshold: f64, connected: bool, palette: &Palette) -> El {
         .radius(6.0)
         .hover_fill(palette.hover)
         .on_press_tx(move |_: &mut Panel, tx| {
-            tx.popup_menu(more_menu(threshold, connected), "more", |panel: &mut Panel, picked, _| {
+            tx.popup_menu(more_menu(threshold, connected), "more", |panel: &mut Panel, picked, tx| {
                 if let Some(id) = picked {
+                    tx.animated();
                     panel.on_menu(id);
                 }
             });
@@ -1564,5 +1580,18 @@ mod tests {
 
         assert_eq!(panel.snapshot.as_ref().unwrap().settings, initial);
         assert!(panel.settings_before.is_none());
+    }
+
+    #[test]
+    fn notifications_page_navigates_back_and_handles_menu_updates() {
+        let mut panel = on_page(Page::Notifications);
+        panel.on_menu("notify-reset:exhausted");
+        panel.on_menu("notify-windows:primary");
+        panel.on_menu("notify-accounts:active");
+        assert_eq!(panel.preferences.notifications.reset_trigger, ResetTrigger::Exhausted);
+        assert_eq!(panel.preferences.notifications.windows, WindowScope::Primary);
+        assert_eq!(panel.preferences.notifications.accounts, AccountScope::Active);
+        assert!(panel.go_back());
+        assert_eq!(panel.page, Page::Settings);
     }
 }

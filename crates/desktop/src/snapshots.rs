@@ -244,6 +244,34 @@ fn banked_resets_expand_confirm_and_dismiss_with_escape() {
 }
 
 #[test]
+fn notifications_settings_open_and_toggle() {
+    let opened = tree_after(settings_list, r#"[{"t": 0.4, "type": "click", "key": "open-notifications"}]"#);
+    assert!(opened.contains("Reset trigger"));
+    assert!(opened.contains("Any usage"));
+
+    let warning_stepped = tree_after(
+        settings_list,
+        r#"[
+            {"t": 0.3, "type": "click", "key": "open-notifications"},
+            {"t": 0.5, "type": "click", "key": "notify-usage-warning"},
+            {"t": 0.7, "type": "click", "key": "notify-warning-up"}
+        ]"#,
+    );
+    assert!(warning_stepped.contains("85%"));
+
+    let turned_off = tree_after(
+        settings_list,
+        r#"[
+            {"t": 0.3, "type": "click", "key": "open-notifications"},
+            {"t": 0.5, "type": "click", "key": "notifications-enabled"},
+            {"t": 0.7, "type": "click", "key": "back"}
+        ]"#,
+    );
+    assert!(turned_off.contains("Notification settings"));
+    assert!(turned_off.contains("\"Off\""));
+}
+
+#[test]
 #[ignore = "writes PNGs for review; run with SWITCH_DESKTOP_SNAPSHOTS=<dir>"]
 fn render_snapshots() {
     let dir = output_dir();
@@ -270,6 +298,13 @@ fn render_snapshots() {
         snap(&dir, "settings-drag", settings_drag, dark);
         snap(&dir, "settings-nothing-in-menu-bar", nothing_in_the_menu_bar, dark);
         snap(&dir, "settings-provider", || settings(Page::Provider("antigravity".into()), |_| {}), dark);
+        snap(&dir, "settings-notifications", || settings(Page::Notifications, |_| {}), dark);
+        snap(
+            &dir,
+            "settings-notifications-off",
+            || settings(Page::Notifications, |preferences| preferences.notifications.enabled = false),
+            dark,
+        );
         snap(&dir, "settings-account", || settings(Page::Account("a2".into()), |_| {}), dark);
         snap(&dir, "settings-usage-only-account", || settings(Page::Account("g1".into()), |_| {}), dark);
         let remove = Some(Prompt::Remove("a2".into()));

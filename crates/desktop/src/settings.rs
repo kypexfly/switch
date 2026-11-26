@@ -7,7 +7,7 @@ use crate::panel::{
     BODY, DISABLED, Look, NAME, Palette, Panel, Prompt, SECTION, SMALL, Task, button, cancel, disable,
     dismissible_notice, drag_handle, empty, movable, note, notice, remove_button, sign_in_button, sign_in_hint, toggle,
 };
-use crate::preferences::{Place, provider_windows};
+use crate::preferences::{AccountScope, NotificationPreferences, Place, ResetTrigger, WindowScope, provider_windows};
 use crate::reorder::List;
 use crate::status::{self, TrayGroup};
 
@@ -17,6 +17,7 @@ pub enum Page {
     Usage,
     Settings,
     AutoSwitch,
+    Notifications,
     Provider(String),
     Account(String),
 }
@@ -36,6 +37,7 @@ pub fn header(panel: &Panel, palette: &Palette) -> El {
     let title = match &panel.page {
         Page::Usage | Page::Settings => "Settings",
         Page::AutoSwitch => "Auto-switch",
+        Page::Notifications => "Notifications",
         Page::Provider(id) => panel.provider(id).map_or("", |provider| &provider.name),
         Page::Account(id) => panel.account(id).map_or("", |account| account.label()),
     };
@@ -68,6 +70,7 @@ pub fn body(panel: &Panel, snapshot: &Snapshot, palette: &Palette) -> Vec<El> {
     match &panel.page {
         Page::Usage | Page::Settings => items.extend(list(panel, snapshot, palette)),
         Page::AutoSwitch => items.extend(auto_switch_page(snapshot, panel, palette)),
+        Page::Notifications => items.extend(notifications_page(snapshot, panel, palette)),
         Page::Provider(id) => {
             items.extend(panel.provider(id).into_iter().flat_map(|provider| provider_page(provider, panel, palette)));
         }
@@ -280,17 +283,275 @@ fn auto_switch_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> Ve
 }
 
 fn app_settings(panel: &Panel, palette: &Palette) -> El {
-    let on = panel.preferences.notifications;
-    let notifications = toggle("notifications", "Notifications", on, palette)
-        .on_press(move |panel: &mut Panel| panel.set_notifications(!on));
+    let summary = if panel.preferences.notifications.enabled { "On" } else { "Off" };
+    let control = row()
+        .gap(4.0)
+        .center_y()
+        .child(text(summary).font(BODY).color(palette.secondary).nowrap())
+        .child(icon(&icons::OPEN, 14.0).color(palette.secondary));
+    let notifications = setting("Notifications", control, palette)
+        .key("open-notifications")
+        .role("button")
+        .label("Notification settings")
+        .focusable(true)
+        .hover_fill(palette.hover)
+        .on_press_tx(|panel: &mut Panel, _| panel.open(Page::Notifications));
     let launch_on = panel.launch_at_login;
     let launch = toggle("launch-at-login", "Launch at login", launch_on, palette)
         .on_press(move |panel: &mut Panel| panel.set_launch_at_login(!launch_on));
-    group(palette).child(setting("Notifications", notifications, palette)).child(divider(palette)).child(setting(
-        "Launch at login",
-        launch,
+    group(palette).child(notifications).child(divider(palette)).child(setting("Launch at login", launch, palette))
+}
+
+fn disable_if(el: El, off: bool) -> El {
+    if off { disable(el) } else { el }
+}
+
+fn notify_toggle(
+    key: &str,
+    label: &str,
+    on: bool,
+    enabled: bool,
+    palette: &Palette,
+    edit: impl Fn(&mut NotificationPreferences, bool) + 'static,
+) -> El {
+    let control = toggle(key, label, on, palette);
+    let control = if enabled {
+        control.on_press(move |panel: &mut Panel| panel.edit_preferences(|all| edit(&mut all.notifications, !on)))
+    } else {
+        control.disabled(true)
+    };
+    setting(label, control, palette)
+}
+
+fn menu_button(
+    key: &str,
+    value_label: &str,
+    description: &str,
+    enabled: bool,
+    palette: &Palette,
+    build_menu: impl Fn() -> PopupMenu + 'static,
+) -> El {
+    let btn = button(key.to_owned(), value_label, description, Look::Plain, palette);
+    if !enabled {
+        return btn.disabled(true);
+    }
+    let menu_key = key.to_owned();
+    btn.on_press_tx(move |_: &mut Panel, tx| {
+        tx.popup_menu(build_menu(), menu_key.clone(), |panel: &mut Panel, picked, _| {
+            if let Some(id) = picked {
+                panel.on_menu(id);
+            }
+        });
+    })
+}
+
+fn reset_trigger_label(trigger: ResetTrigger) -> &'static str {
+    match trigger {
+        ResetTrigger::Exhausted => "After 100% only",
+        ResetTrigger::Any => "Any usage",
+    }
+}
+
+fn window_scope_label(scope: WindowScope) -> &'static str {
+    match scope {
+        WindowScope::Primary => "Primary only",
+        WindowScope::All => "All windows",
+    }
+}
+
+fn account_scope_label(scope: AccountScope) -> &'static str {
+    match scope {
+        AccountScope::All => "All accounts",
+        AccountScope::Active => "Active only",
+    }
+}
+
+fn section_label(title: &str, enabled: bool, palette: &Palette) -> El {
+    let heading = text(title).font(BODY).color(palette.secondary).nowrap();
+    disable_if(row().h(20.0).px(12.0).center_y().child(heading), !enabled)
+}
+
+fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> Vec<El> {
+    let prefs = &panel.preferences.notifications;
+    let enabled = prefs.enabled;
+
+    let master = toggle("notifications-enabled", "Notifications", enabled, palette)
+        .on_press(move |panel: &mut Panel| panel.set_notifications(!enabled));
+    let sound = notify_toggle("notifications-sound", "Sound", prefs.sound, enabled, palette, |n, v| n.sound = v);
+    let test_btn = button("notifications-test".to_owned(), "Send", "Send test notification", Look::Plain, palette);
+    let test_btn = if enabled {
+        test_btn.on_press(|panel: &mut Panel| panel.send_test_notification())
+    } else {
+        test_btn.disabled(true)
+    };
+    let general = group(palette)
+        .child(setting("Notifications", master, palette))
+        .child(divider(palette))
+        .child(disable_if(sound, !enabled))
+        .child(divider(palette))
+        .child(disable_if(setting("Test notification", test_btn, palette), !enabled));
+
+    let threshold = prefs.warning_threshold;
+    let warn_enabled = enabled && prefs.usage_warning;
+    let warn_down = button("notify-warning-down".to_owned(), "-", "Decrease warning threshold", Look::Plain, palette);
+    let warn_down = if warn_enabled {
+        if threshold > 50 {
+            warn_down.on_press(move |panel: &mut Panel| {
+                panel.edit_preferences(|all| all.notifications.warning_threshold = threshold.saturating_sub(5).max(50));
+            })
+        } else {
+            disable(warn_down)
+        }
+    } else {
+        warn_down.disabled(true)
+    };
+    let warn_up = button("notify-warning-up".to_owned(), "+", "Increase warning threshold", Look::Plain, palette);
+    let warn_up = if warn_enabled {
+        if threshold < 95 {
+            warn_up.on_press(move |panel: &mut Panel| {
+                panel.edit_preferences(|all| all.notifications.warning_threshold = (threshold + 5).min(95));
+            })
+        } else {
+            disable(warn_up)
+        }
+    } else {
+        warn_up.disabled(true)
+    };
+    let threshold_controls = row()
+        .gap(6.0)
+        .center_y()
+        .child(warn_down)
+        .child(text(format!("{threshold}%")).font(BODY).color(palette.text).nowrap())
+        .child(warn_up);
+    let threshold_row =
+        disable_if(setting("Warning threshold", threshold_controls, palette), enabled && !prefs.usage_warning);
+
+    let reset_trigger = prefs.reset_trigger;
+    let reset_enabled = enabled && prefs.limit_reset;
+    let reset_btn = menu_button(
+        "notify-reset-trigger",
+        reset_trigger_label(reset_trigger),
+        "Reset trigger",
+        reset_enabled,
         palette,
-    ))
+        move || {
+            PopupMenu::new()
+                .item(
+                    PopupItem::new("notify-reset:exhausted", "After 100% only")
+                        .checked(reset_trigger == ResetTrigger::Exhausted),
+                )
+                .item(PopupItem::new("notify-reset:any", "Any usage").checked(reset_trigger == ResetTrigger::Any))
+        },
+    );
+    let reset_trigger_row = disable_if(setting("Reset trigger", reset_btn, palette), enabled && !prefs.limit_reset);
+
+    let events = group(palette)
+        .child(notify_toggle("notify-auto-switch", "Auto-switch", prefs.auto_switch, enabled, palette, |n, v| {
+            n.auto_switch = v
+        }))
+        .child(divider(palette))
+        .child(notify_toggle("notify-usage-warning", "Usage warning", prefs.usage_warning, enabled, palette, |n, v| {
+            n.usage_warning = v
+        }))
+        .child(divider(palette))
+        .child(threshold_row)
+        .child(divider(palette))
+        .child(notify_toggle("notify-limit-reached", "Limit reached", prefs.limit_reached, enabled, palette, |n, v| {
+            n.limit_reached = v
+        }))
+        .child(divider(palette))
+        .child(notify_toggle("notify-limit-reset", "Limit reset", prefs.limit_reset, enabled, palette, |n, v| {
+            n.limit_reset = v
+        }))
+        .child(divider(palette))
+        .child(reset_trigger_row)
+        .child(divider(palette))
+        .child(notify_toggle("notify-signed-out", "Signed out", prefs.signed_out, enabled, palette, |n, v| {
+            n.signed_out = v
+        }));
+
+    let windows_scope = prefs.windows;
+    let windows_btn = menu_button(
+        "notify-windows",
+        window_scope_label(windows_scope),
+        "Windows scope",
+        enabled,
+        palette,
+        move || {
+            PopupMenu::new()
+                .item(
+                    PopupItem::new("notify-windows:primary", "Primary only")
+                        .checked(windows_scope == WindowScope::Primary),
+                )
+                .item(PopupItem::new("notify-windows:all", "All windows").checked(windows_scope == WindowScope::All))
+        },
+    );
+    let accounts_scope = prefs.accounts;
+    let accounts_btn = menu_button(
+        "notify-accounts",
+        account_scope_label(accounts_scope),
+        "Accounts scope",
+        enabled,
+        palette,
+        move || {
+            PopupMenu::new()
+                .item(
+                    PopupItem::new("notify-accounts:all", "All accounts").checked(accounts_scope == AccountScope::All),
+                )
+                .item(
+                    PopupItem::new("notify-accounts:active", "Active only")
+                        .checked(accounts_scope == AccountScope::Active),
+                )
+        },
+    );
+    let scope = group(palette).child(setting("Windows", windows_btn, palette)).child(divider(palette)).child(setting(
+        "Accounts",
+        accounts_btn,
+        palette,
+    ));
+
+    let mut items = vec![
+        general,
+        section_label("Events", enabled, palette),
+        disable_if(events, !enabled),
+        disable_if(
+            notes(note("After 100% only alerts when a blocked window becomes usable again.", palette.secondary)),
+            !enabled,
+        ),
+        section_label("Scope", enabled, palette),
+        disable_if(scope, !enabled),
+        disable_if(
+            notes(note("Usage-only providers are always included under Active only.", palette.secondary)),
+            !enabled,
+        ),
+    ];
+
+    let multi_provider = snapshot.providers.len() > 1;
+    let accounts: Vec<(&ProviderState, &Account)> =
+        snapshot.providers.iter().flat_map(|p| p.accounts.iter().map(move |a| (p, a))).collect();
+    if !accounts.is_empty() {
+        items.push(section_label("Notify for accounts", enabled, palette));
+        let mut group_el = group(palette);
+        for (index, (provider, account)) in accounts.into_iter().enumerate() {
+            if index > 0 {
+                group_el = group_el.child(divider(palette));
+            }
+            let label = if multi_provider {
+                format!("{} ({})", account.label(), provider.name)
+            } else {
+                account.label().to_owned()
+            };
+            let id = account.id.clone();
+            let on = prefs.account_on(&id);
+            let key = format!("notify-account-{id}");
+            group_el = group_el.child(notify_toggle(&key, &label, on, enabled, palette, move |n, v| {
+                n.set_account(&id, v);
+            }));
+        }
+        items.push(disable_if(group_el, !enabled));
+    }
+
+    items
 }
 
 fn notes(note: El) -> El {

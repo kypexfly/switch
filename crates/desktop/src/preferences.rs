@@ -4,10 +4,99 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use switch_protocol::{Account, ProviderState, Snapshot, UsageWindow};
 
 pub const MAX_TRAY_WINDOWS: usize = 2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetTrigger {
+    Exhausted,
+    #[default]
+    Any,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowScope {
+    Primary,
+    #[default]
+    All,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountScope {
+    #[default]
+    All,
+    Active,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationPreferences {
+    pub enabled: bool,
+    pub sound: bool,
+    pub auto_switch: bool,
+    pub usage_warning: bool,
+    pub warning_threshold: u8,
+    pub limit_reached: bool,
+    pub limit_reset: bool,
+    pub reset_trigger: ResetTrigger,
+    pub signed_out: bool,
+    pub windows: WindowScope,
+    pub accounts: AccountScope,
+    pub muted_accounts: BTreeSet<String>,
+}
+
+impl Default for NotificationPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sound: true,
+            auto_switch: true,
+            usage_warning: false,
+            warning_threshold: 80,
+            limit_reached: true,
+            limit_reset: true,
+            reset_trigger: ResetTrigger::Any,
+            signed_out: true,
+            windows: WindowScope::All,
+            accounts: AccountScope::All,
+            muted_accounts: BTreeSet::new(),
+        }
+    }
+}
+
+impl NotificationPreferences {
+    pub fn account_on(&self, account: &str) -> bool {
+        !self.muted_accounts.contains(account)
+    }
+
+    pub fn set_account(&mut self, account: &str, on: bool) {
+        set(&mut self.muted_accounts, account, on);
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredNotifications {
+    Bool(bool),
+    Config(NotificationPreferences),
+}
+
+fn deserialize_notifications<'de, D>(deserializer: D) -> Result<NotificationPreferences, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match StoredNotifications::deserialize(deserializer)? {
+        StoredNotifications::Bool(enabled) => {
+            Ok(NotificationPreferences { enabled, ..NotificationPreferences::default() })
+        }
+        StoredNotifications::Config(config) => Ok(config),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Place {
@@ -23,24 +112,14 @@ pub struct Hidden {
 }
 
 /// What this app shows. The server and the other clients don't know about it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
     hidden_in_panel: Hidden,
     hidden_in_menu_bar: Hidden,
     tray_windows: BTreeMap<String, Vec<String>>,
-    pub notifications: bool,
-}
-
-impl Default for Preferences {
-    fn default() -> Self {
-        Self {
-            hidden_in_panel: Hidden::default(),
-            hidden_in_menu_bar: Hidden::default(),
-            tray_windows: BTreeMap::new(),
-            notifications: true,
-        }
-    }
+    #[serde(deserialize_with = "deserialize_notifications")]
+    pub notifications: NotificationPreferences,
 }
 
 impl Preferences {
@@ -254,5 +333,43 @@ mod tests {
         assert_eq!(load(&path).unwrap(), preferences);
         fs::write(&path, "{").unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn legacy_boolean_notifications_upgrade_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path(dir.path());
+        fs::write(&path, r#"{"notifications": false}"#).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(!loaded.notifications.enabled);
+        assert!(loaded.notifications.sound);
+        assert_eq!(loaded.notifications.warning_threshold, 80);
+
+        fs::write(&path, r#"{"notifications": true}"#).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(loaded.notifications.enabled);
+        assert_eq!(loaded.notifications, NotificationPreferences::default());
+    }
+
+    #[test]
+    fn partial_and_full_notification_preferences_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path(dir.path());
+        fs::write(&path, r#"{"notifications": {"usage_warning": true, "warning_threshold": 75}}"#).unwrap();
+        let partial = load(&path).unwrap();
+        assert!(partial.notifications.enabled);
+        assert!(partial.notifications.usage_warning);
+        assert_eq!(partial.notifications.warning_threshold, 75);
+        assert_eq!(partial.notifications.reset_trigger, ResetTrigger::Any);
+        assert_eq!(partial.notifications.windows, WindowScope::All);
+
+        let mut preferences = Preferences::default();
+        preferences.notifications.sound = false;
+        preferences.notifications.reset_trigger = ResetTrigger::Exhausted;
+        preferences.notifications.windows = WindowScope::Primary;
+        preferences.notifications.accounts = AccountScope::Active;
+        preferences.notifications.set_account("a2", false);
+        save(&path, &preferences).unwrap();
+        assert_eq!(load(&path).unwrap(), preferences);
     }
 }
