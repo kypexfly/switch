@@ -83,7 +83,7 @@ pub fn reset_picker(
         if let Some(expires_at) = grant.expires_at {
             let local = expires_at.to_zoned(zone.clone());
             let span = countdown(expires_at, now).replace("resets in ", "");
-            line.push(muted(format!("  expires {} ({span})", local.strftime("%b %-d %-I:%M %p"))));
+            line.push(muted(format!("  expires {} ({span})", local.strftime("%b %-d %H:%M"))));
         }
         if !grant.usable {
             line.push("  unavailable".fg(theme.warning));

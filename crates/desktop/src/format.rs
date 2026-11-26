@@ -52,9 +52,9 @@ pub fn reset_time(window: &UsageWindow, now: Timestamp, zone: &TimeZone, exact: 
     }
     let local = resets_at.to_zoned(zone.clone());
     let format = if local.date() == now.to_zoned(zone.clone()).date() {
-        "%-I:%M %p"
+        "%H:%M"
     } else if seconds < 6 * 86400 {
-        "%a %-I:%M %p"
+        "%a %H:%M"
     } else {
         "%b %-d"
     };
@@ -85,7 +85,7 @@ pub fn reset_expiry_countdown(expires_at: Timestamp, now: Timestamp) -> String {
 }
 
 pub fn reset_expiry_date(expires_at: Timestamp, zone: &TimeZone) -> String {
-    expires_at.to_zoned(zone.clone()).strftime("%b %-d, %-I:%M %p").to_string()
+    expires_at.to_zoned(zone.clone()).strftime("%b %-d, %H:%M").to_string()
 }
 
 pub fn window_summary(window: &UsageWindow, now: Timestamp) -> String {
@@ -230,8 +230,8 @@ mod tests {
         let zone = TimeZone::get("America/New_York").unwrap();
         let exact = |minutes| reset_time(&session(10.0, minutes), now, &zone, true).unwrap();
         assert_eq!(reset_time(&session(10.0, 103), now, &zone, false).unwrap(), "1h 43m");
-        assert_eq!(exact(103), "8:43 AM");
-        assert_eq!(exact(20 * 60), "Wed 3:00 AM");
+        assert_eq!(exact(103), "08:43");
+        assert_eq!(exact(20 * 60), "Wed 03:00");
         assert_eq!(exact(7 * 24 * 60), "Dec 1");
     }
 
@@ -291,7 +291,7 @@ mod tests {
         let zone = TimeZone::UTC;
         let in_two_weeks = now + jiff::SignedDuration::from_hours(14 * 24 + 23);
         assert_eq!(reset_expiry_countdown(in_two_weeks, now), "14d 23h");
-        assert_eq!(reset_expiry_date(in_two_weeks, &zone), "Dec 9, 11:00 AM");
+        assert_eq!(reset_expiry_date(in_two_weeks, &zone), "Dec 9, 11:00");
         let in_hundred_days = now + jiff::SignedDuration::from_hours(100 * 24);
         assert_eq!(reset_expiry_countdown(in_hundred_days, now), "3mo 10d");
     }

@@ -58,9 +58,9 @@ pub fn reset_time(window: &UsageWindow, now: Timestamp, zone: &TimeZone, exact: 
     let seconds = resets_at.as_second() - now.as_second();
     let local = resets_at.to_zoned(zone.clone());
     let fmt = if local.date() == now.to_zoned(zone.clone()).date() {
-        "%-I:%M %p"
+        "%H:%M"
     } else if seconds < 6 * 86_400 {
-        "%a %-I:%M %p"
+        "%a %H:%M"
     } else {
         "%b %-d"
     };
@@ -156,6 +156,26 @@ mod tests {
         ] {
             assert_eq!(countdown(at(1_000 + seconds), at(1_000)), expected);
         }
+    }
+
+    #[test]
+    fn reset_times_use_24_hour_clock() {
+        let now: Timestamp = "2026-11-24T12:00:00Z".parse().unwrap();
+        let zone = TimeZone::get("America/New_York").unwrap();
+        let exact = |minutes| {
+            let window = UsageWindow {
+                id: "five_hour".into(),
+                label: "Session".into(),
+                used_percent: Some(10.0),
+                resets_at: Some(now + jiff::SignedDuration::from_mins(minutes)),
+                primary: true,
+                period_seconds: None,
+            };
+            reset_time(&window, now, &zone, true)
+        };
+        assert_eq!(exact(103), "resets 08:43");
+        assert_eq!(exact(20 * 60), "resets Wed 03:00");
+        assert_eq!(exact(7 * 24 * 60), "resets Dec 1");
     }
 
     #[test]
