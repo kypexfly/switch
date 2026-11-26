@@ -1,6 +1,8 @@
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use switch_protocol::{Account, AccountStatus, ProviderState, UsageWindow};
+use switch_protocol::{Account, AccountStatus, ProviderState, Snapshot, Strategy, UsageWindow};
+
+use crate::preferences::UsageShown;
 
 pub fn percent(used: Option<f64>) -> String {
     match used {
@@ -44,21 +46,24 @@ pub fn resets_in(window: &UsageWindow, now: Timestamp) -> Option<String> {
     Some(format!("resets in {}", duration(resets_at.as_second() - now.as_second())))
 }
 
-pub fn reset_time(window: &UsageWindow, now: Timestamp, zone: &TimeZone, exact: bool) -> Option<String> {
-    let resets_at = window.resets_at?;
-    let seconds = resets_at.as_second() - now.as_second();
-    if !exact {
-        return Some(duration(seconds));
-    }
-    let local = resets_at.to_zoned(zone.clone());
+pub fn local_time(at: Timestamp, now: Timestamp, zone: &TimeZone) -> String {
+    let local = at.to_zoned(zone.clone());
     let format = if local.date() == now.to_zoned(zone.clone()).date() {
         "%H:%M"
-    } else if seconds < 6 * 86400 {
+    } else if (at.as_second() - now.as_second()).abs() < 6 * 86400 {
         "%a %H:%M"
     } else {
         "%b %-d %H:%M"
     };
-    Some(local.strftime(format).to_string())
+    local.strftime(format).to_string()
+}
+
+pub fn reset_time(window: &UsageWindow, now: Timestamp, zone: &TimeZone, exact: bool) -> Option<String> {
+    let resets_at = window.resets_at?;
+    if !exact {
+        return Some(duration(resets_at.as_second() - now.as_second()));
+    }
+    Some(local_time(resets_at, now, zone))
 }
 
 pub fn pace(window: &UsageWindow, now: Timestamp) -> Option<f64> {
@@ -88,13 +93,93 @@ pub fn reset_expiry_date(expires_at: Timestamp, zone: &TimeZone) -> String {
     expires_at.to_zoned(zone.clone()).strftime("%b %-d, %H:%M").to_string()
 }
 
-pub fn window_summary(window: &UsageWindow, now: Timestamp) -> String {
-    let mut summary = format!("{} {} used", window.label, percent(window.used_percent));
+pub fn window_summary(window: &UsageWindow, shown: UsageShown, now: Timestamp) -> String {
+    let (value, word) = match shown {
+        UsageShown::Used => (window.used_percent, "used"),
+        UsageShown::Left => {
+            (window.used_percent.filter(|v| v.is_finite()).map(|v| 100.0 - v.clamp(0.0, 100.0)), "left")
+        }
+    };
+    let mut summary = format!("{} {} {word}", window.label, percent(value));
     if let Some(resets) = resets_in(window, now) {
         summary.push_str(", ");
         summary.push_str(&resets);
     }
     summary
+}
+
+pub fn window_tooltip(
+    window: &UsageWindow,
+    shown: UsageShown,
+    now: Timestamp,
+    dimmed_reason: Option<&str>,
+) -> Vec<String> {
+    let mut rows = Vec::new();
+    let headline = match window.used_percent.filter(|used| used.is_finite()) {
+        Some(used) => {
+            let used = used.clamp(0.0, 100.0);
+            let used_pct = percent(Some(used));
+            let left_pct = percent(Some(100.0 - used));
+            match shown {
+                UsageShown::Used => format!("{}: {used_pct} used ({left_pct} left)", window.label),
+                UsageShown::Left => format!("{}: {left_pct} left ({used_pct} used)", window.label),
+            }
+        }
+        None => format!("{}: No usage data", window.label),
+    };
+    rows.push(headline);
+    if let (Some(p), Some(period)) = (pace(window, now), window.period_seconds) {
+        let period = duration(period);
+        let row = match shown {
+            UsageShown::Used => format!("Pace tick: {} of {period} window elapsed", percent(Some(p * 100.0))),
+            UsageShown::Left => format!("Pace tick: {} of {period} window left", percent(Some((1.0 - p) * 100.0))),
+        };
+        rows.push(row);
+    }
+    if let Some(reason) = dimmed_reason {
+        rows.push(reason.to_owned());
+    }
+    rows
+}
+
+pub fn reset_tooltip(window: &UsageWindow, now: Timestamp, zone: &TimeZone, exact: bool) -> Option<String> {
+    let resets_at = window.resets_at?;
+    if exact {
+        Some(format!("Resets in {}", duration(resets_at.as_second() - now.as_second())))
+    } else {
+        Some(format!("Resets at {}", local_time(resets_at, now, zone)))
+    }
+}
+
+pub fn account_tooltip(account: &Account, now: Timestamp, zone: &TimeZone) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut identity = account.identity.email.clone();
+    if let Some(org) = account.identity.organization.as_deref().filter(|org| !org.is_empty()) {
+        identity.push_str(&format!(" - {org}"));
+    }
+    rows.push(identity);
+    if let Some(usage) = &account.usage {
+        rows.push(format!("Updated {} ({})", age(usage.fetched_at, now), local_time(usage.fetched_at, now, zone)));
+    }
+    rows
+}
+
+pub fn auto_switch_tooltip(snapshot: &Snapshot, now: Timestamp) -> Vec<String> {
+    let strategy = match snapshot.settings.strategy {
+        Strategy::Best => "best account",
+        Strategy::Next => "next account",
+    };
+    let cooldown = match snapshot.settings.cooldown_seconds {
+        0 => "no cooldown".to_owned(),
+        s if s < 60 => format!("{s}s cooldown"),
+        s => format!("{} cooldown", duration(s as i64)),
+    };
+    let mut rows =
+        vec![format!("Switch to the {strategy} at {} ({cooldown})", percent(Some(snapshot.settings.threshold)))];
+    if let Some(last) = snapshot.providers.iter().filter_map(|p| p.last_auto_switch_at).max() {
+        rows.push(format!("Last switched {}", age(last, now)));
+    }
+    rows
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -209,7 +294,8 @@ mod tests {
             primary: true,
             period_seconds: None,
         };
-        assert_eq!(window_summary(&window, now), "Session 97% used, resets in 1h 2m");
+        assert_eq!(window_summary(&window, UsageShown::Used, now), "Session 97% used, resets in 1h 2m");
+        assert_eq!(window_summary(&window, UsageShown::Left, now), "Session 3% left, resets in 1h 2m");
     }
 
     fn session(used: f64, resets_in_minutes: i64) -> UsageWindow {
@@ -294,5 +380,48 @@ mod tests {
         assert_eq!(reset_expiry_date(in_two_weeks, &zone), "Dec 9, 11:00");
         let in_hundred_days = now + jiff::SignedDuration::from_hours(100 * 24);
         assert_eq!(reset_expiry_countdown(in_hundred_days, now), "3mo 10d");
+    }
+
+    #[test]
+    fn tooltip_helpers_format_windows_resets_accounts_and_auto_switch() {
+        let now = fixtures::now();
+        let zone = TimeZone::UTC;
+        let snapshot = fixtures::two_providers();
+        let account = &snapshot.providers[0].accounts[0];
+        let window = &account.usage.as_ref().unwrap().windows[0];
+
+        assert_eq!(local_time(now, now, &zone), "12:00");
+        assert_eq!(
+            window_tooltip(window, UsageShown::Used, now, None),
+            vec!["Session: 97% used (3% left)", "Pace tick: 79% of 5h window elapsed"]
+        );
+        assert_eq!(
+            window_tooltip(window, UsageShown::Left, now, Some("Account is paused")),
+            vec!["Session: 3% left (97% used)", "Pace tick: 21% of 5h window left", "Account is paused"]
+        );
+        let no_data = UsageWindow {
+            id: "x".into(),
+            label: "Opus".into(),
+            used_percent: None,
+            resets_at: None,
+            primary: false,
+            period_seconds: None,
+        };
+        assert_eq!(window_tooltip(&no_data, UsageShown::Used, now, None), vec!["Opus: No usage data"]);
+
+        assert_eq!(reset_tooltip(window, now, &zone, false).as_deref(), Some("Resets at 13:02"));
+        assert_eq!(reset_tooltip(window, now, &zone, true).as_deref(), Some("Resets in 1h 2m"));
+        assert_eq!(reset_tooltip(&no_data, now, &zone, false), None);
+
+        let mut org_account = account.clone();
+        org_account.identity.organization = Some("Acme".into());
+        assert_eq!(account_tooltip(&org_account, now, &zone), vec!["work@acme.dev - Acme", "Updated 2m ago (11:58)"]);
+
+        let mut auto_snap = fixtures::two_providers();
+        auto_snap.providers[0].last_auto_switch_at = Some(now - jiff::SignedDuration::from_mins(5));
+        assert_eq!(
+            auto_switch_tooltip(&auto_snap, now),
+            vec!["Switch to the best account at 90% (5m cooldown)", "Last switched 5m ago"]
+        );
     }
 }

@@ -37,7 +37,7 @@ impl TrayController {
     fn new(on_event: impl Fn(TrayEvent) + Send + Sync + 'static) -> Result<Self, rune::TrayError> {
         let thickness = NSStatusBar::systemStatusBar().thickness();
         let groups = status::tray_groups(None, &Preferences::default());
-        let tooltip = status::tooltip(None, &Preferences::default(), Timestamp::now());
+        let tooltip = status::tooltip(None, &Preferences::default(), false, Timestamp::now());
         let menu = status::menu(None, &Preferences::default(), false);
         let spec = TraySpec::new(BUNDLE_ID, "Switch", icon(&groups, thickness)).tooltip(&tooltip).menu(menu.clone());
         Ok(Self { tray: Tray::new(spec, on_event)?, thickness, groups, tooltip, menu })
@@ -51,7 +51,7 @@ impl TrayController {
             }
             self.groups = groups;
         }
-        let tooltip = status::tooltip(snapshot, preferences, now);
+        let tooltip = status::tooltip(snapshot, preferences, connected, now);
         if tooltip != self.tooltip {
             self.tray.set_tooltip(&tooltip);
             self.tooltip = tooltip;

@@ -284,6 +284,45 @@ fn notifications_settings_open_and_toggle() {
     assert!(turned_off.contains("\"Off\""));
 }
 
+fn tooltip_after(state: impl Fn() -> Panel, key: &str) -> (String, [f64; 4]) {
+    let events = format!(r#"[{{"t": 0.5, "type": "move", "key": "{key}"}}]"#);
+    let tree = tree_after(state, &events);
+    let parsed: serde_json::Value = serde_json::from_str(&tree).unwrap();
+    let tip = parsed["tooltip"].as_object().unwrap_or_else(|| panic!("expected tooltip on {key}: {tree}"));
+    let text = tip["text"].as_str().unwrap().to_owned();
+    let rect = tip["rect"].as_array().unwrap();
+    let rect =
+        [rect[0].as_f64().unwrap(), rect[1].as_f64().unwrap(), rect[2].as_f64().unwrap(), rect[3].as_f64().unwrap()];
+    (text, rect)
+}
+
+#[test]
+fn tooltips_show_on_hover_and_stay_inside_panel() {
+    let (text, rect) = tooltip_after(|| panel(Some(fixtures::two_providers())), "meter-a1-five_hour");
+    assert!(text.contains("Session: 97% used (3% left)"), "{text}");
+    assert!(text.contains("Pace tick:"), "{text}");
+    assert!(rect[0] >= 0.0 && rect[1] >= 0.0 && rect[0] + rect[2] <= 360.0 && rect[1] + rect[3] <= 640.0, "{rect:?}");
+
+    let (text, _) = tooltip_after(|| panel(Some(fixtures::two_providers())), "reset-a1-five_hour");
+    assert!(text.starts_with("Resets at "), "{text}");
+
+    let (text, _) = tooltip_after(|| panel(Some(fixtures::two_providers())), "refresh");
+    assert!(text.contains("Refresh usage"), "{text}");
+
+    let (text, _) = tooltip_after(|| panel(Some(fixtures::two_providers())), "more");
+    assert!(text.contains("Threshold, settings, and quit"), "{text}");
+
+    let (text, _) = tooltip_after(settings_list, "grip-a1");
+    assert!(text.contains("Drag to reorder"), "{text}");
+    assert!(text.contains("Option"), "{text}");
+
+    let (text, _) = tooltip_after(settings_list, "back");
+    assert_eq!(text, "Back Esc");
+
+    let (text, _) = tooltip_after(|| settings(Page::Provider("antigravity".into()), |_| {}), "window-3p-5h");
+    assert!(text.contains("maximum 2"), "{text}");
+}
+
 #[test]
 #[ignore = "writes PNGs for review; run with SWITCH_DESKTOP_SNAPSHOTS=<dir>"]
 fn render_snapshots() {

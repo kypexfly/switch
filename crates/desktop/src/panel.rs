@@ -8,8 +8,9 @@ use anyhow::Result;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use rune::{
-    AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, LoopSpec, Phase, PopupItem, PopupMenu, ScrollSpec,
-    Shape, TextEdit, TextStyle, canvas, col, color, el, icon, oklch, oklcha, row, text, text_input,
+    AppHandle, Color, Cursor, Cx, Drag, El, HelpLook, Key, KeyEvent, LineCap, LoopSpec, Phase, PopupItem, PopupMenu,
+    ScrollSpec, Shadow, Shape, Side, TextEdit, TextStyle, canvas, col, color, el, icon, oklch, oklcha, row, text,
+    text_input,
 };
 use switch_client::{Client, oauth};
 use switch_protocol::{
@@ -738,8 +739,46 @@ const BUTTON: TextStyle = TextStyle::new(12.0, 500.0);
 const DIMMED: f32 = 0.5;
 pub const DISABLED: f32 = 0.45;
 
+fn help_look(dark: bool, palette: &Palette) -> HelpLook {
+    HelpLook::system(dark)
+        .fill(palette.active)
+        .ink(palette.text)
+        .ring(1.0, palette.border)
+        .radius(6.0)
+        .padding(8.0, 5.0)
+        .font(SMALL.lh(15.0))
+        .max_width(Some(240.0))
+        .gap(5.0)
+        .margin(8.0)
+        .side(Side::Top)
+        .delay(0.35)
+        .skip_delay(0.25)
+        .on_focus(true)
+        .shadows([Shadow {
+            x: 0.0,
+            y: 4.0,
+            blur: 12.0,
+            color: oklcha(0.0, 0.0, 0.0, if dark { 0.35 } else { 0.14 }),
+            ..Shadow::default()
+        }])
+        .keycaps(palette.hover, palette.secondary, TextStyle::new(10.0, 500.0).lh(10.0), false)
+}
+
+pub fn help_rows(mut el: El, rows: &[String]) -> El {
+    let Some((first, rest)) = rows.split_first() else {
+        return el;
+    };
+    el = el.help(first);
+    for row in rest {
+        el = el.help_row(row);
+    }
+    el
+}
+
 pub fn view(panel: &Panel, cx: &mut Cx<Panel>) -> El {
-    let palette = palette(cx.system_dark());
+    let dark = cx.system_dark();
+    let palette = palette(dark);
+    cx.help_look(help_look(dark, &palette));
     let in_settings = panel.page != Page::Usage;
     let mut view = col()
         .key("panel")
@@ -762,7 +801,7 @@ pub fn view(panel: &Panel, cx: &mut Cx<Panel>) -> El {
         snapshot => {
             view = view.child(content.key("body").pt(6.0).pb(8.0).gap(SECTION_GAP).children(body(panel, &palette)));
             match snapshot {
-                Some(snapshot) => view.child(footer(panel, &snapshot.settings, &palette)),
+                Some(snapshot) => view.child(footer(panel, snapshot, &palette)),
                 None => view,
             }
         }
@@ -856,6 +895,7 @@ pub fn dismissible_notice(
         .center()
         .radius(4.0)
         .hover_fill(palette.hover)
+        .help("Dismiss")
         .on_press(on_dismiss)
         .child(icon(&icons::CLOSE, 12.0).color(palette.secondary));
     notice(key, message, color, palette).child(dismiss)
@@ -910,9 +950,13 @@ fn section_header(provider: &ProviderState, panel: &Panel, palette: &Palette) ->
     if let Some(mark) = icons::provider_mark(&provider.id) {
         header = header.child(icon(mark, 14.0).color(palette.text));
     }
-    header = header
-        .child(text(&provider.name).font(SECTION).color(palette.text).truncate().shrink().min_w(0.0))
-        .child(el().grow(1.0));
+    let title = text(&provider.name).font(SECTION).color(palette.text).truncate().shrink().min_w(0.0);
+    let title = if panel.ids(&List::Providers).len() > 1 && panel.connected {
+        title.help("Drag to reorder providers")
+    } else {
+        title.help_when_truncated(&provider.name)
+    };
+    header = header.child(title).child(el().grow(1.0));
     let has_resets = provider
         .accounts
         .iter()
@@ -923,6 +967,7 @@ fn section_header(provider: &ProviderState, panel: &Panel, palette: &Palette) ->
         return header;
     }
     let label = if panel.exact_resets { "Resets at" } else { "Resets in" };
+    let tip = if panel.exact_resets { "Show time until reset" } else { "Show local reset times" };
     header.child(
         row()
             .key(format!("resets-{}", provider.id))
@@ -932,6 +977,7 @@ fn section_header(provider: &ProviderState, panel: &Panel, palette: &Palette) ->
             .cursor(Cursor::Pointer)
             .gap(2.0)
             .center_y()
+            .help(tip)
             .on_press(|panel: &mut Panel| panel.exact_resets = !panel.exact_resets)
             .child(text(label).font(SMALL).color(palette.secondary).nowrap())
             .child(icon(&icons::UP_DOWN, 10.0).color(palette.secondary)),
@@ -943,11 +989,22 @@ fn card(active: bool, palette: &Palette) -> El {
     if active { card.fill(palette.active).border(1.0, palette.active_border) } else { card }
 }
 
-fn card_header(name: &str, name_color: Color, details: Vec<(String, Tone)>, palette: &Palette) -> El {
-    let mut header =
-        row().h(24.0).gap(6.0).center_y().child(text(name).font(NAME).color(name_color).truncate().shrink().min_w(0.0));
-    for (detail, tone) in details {
-        header = header.child(text(detail).font(SMALL).color(palette.tone(tone)).nowrap());
+fn card_header(
+    name: &str,
+    name_color: Color,
+    name_tip: &[String],
+    details: Vec<(String, Tone, Option<String>)>,
+    palette: &Palette,
+) -> El {
+    let name_el = text(name).font(NAME).color(name_color).truncate().shrink().min_w(0.0);
+    let name_el = if name_tip.is_empty() { name_el.help_when_truncated(name) } else { help_rows(name_el, name_tip) };
+    let mut header = row().h(24.0).gap(6.0).center_y().child(name_el);
+    for (detail, tone, tip) in details {
+        let mut detail_el = text(detail).font(SMALL).color(palette.tone(tone)).nowrap();
+        if let Some(tip) = tip {
+            detail_el = detail_el.help(tip);
+        }
+        header = header.child(detail_el);
     }
     header.child(el().grow(1.0))
 }
@@ -966,15 +1023,18 @@ pub fn sign_in_button(key: String, provider: &ProviderState, panel: &Panel, pale
         return button(key, "Signing in", &description, Look::Busy, palette).disabled(true);
     }
     let sign_in = button(key, "Sign in", &description, Look::Primary, palette);
-    if !panel.connected || panel.signing_in() {
-        return disable(sign_in);
+    if !panel.connected {
+        return disable(sign_in).help("Server offline");
+    }
+    if panel.signing_in() {
+        return disable(sign_in).help("Another sign-in is in progress");
     }
     let id = provider.id.clone();
     sign_in.on_press_tx(move |panel: &mut Panel, _| panel.sign_in(id.clone()))
 }
 
 fn no_accounts(provider: &ProviderState, panel: &Panel, palette: &Palette) -> El {
-    let header = card_header("No account", palette.text, Vec::new(), palette);
+    let header = card_header("No account", palette.text, &[], Vec::new(), palette);
     if provider.sign_in {
         return card(false, palette)
             .child(header.child(sign_in_button(format!("sign-in-{}", provider.id), provider, panel, palette)))
@@ -993,19 +1053,38 @@ fn unsaved_login(provider: &ProviderState, login: &Identity, panel: &Panel, pale
     };
     let id = provider.id.clone();
     let save = button(format!("save-{}", provider.id), "Save", "Save this login as an account", Look::Primary, palette);
-    let save = if !panel.connected || panel.running.contains(&Task::Save) {
-        disable(save)
+    let save = if !panel.connected {
+        disable(save).help("Server offline")
+    } else if panel.running.contains(&Task::Save) {
+        disable(save).help("Saving login")
     } else {
-        save.on_press_tx(move |panel: &mut Panel, _| panel.save_login(id.clone()))
+        save.help("Save this login so you can switch back to it")
+            .on_press_tx(move |panel: &mut Panel, _| panel.save_login(id.clone()))
     };
-    card(true, palette)
-        .key(format!("unsaved-{}", provider.id))
-        .child(card_header(&login.email, palette.text, vec![(detail, Tone::Warning)], palette).child(save))
+    let name_tip = [login.email.clone(), "Live login not yet saved in Switch".to_owned()];
+    card(true, palette).key(format!("unsaved-{}", provider.id)).child(
+        card_header(&login.email, palette.text, &name_tip, vec![(detail, Tone::Warning, None)], palette).child(save),
+    )
 }
 
 fn account_row(account: &Account, provider: &ProviderState, panel: &Panel, palette: &Palette) -> El {
     let name_color = if account.enabled { palette.text } else { palette.secondary };
-    let details = format::account_details(account, provider, panel.now);
+    let stale_tip = if matches!(account.status, AccountStatus::Stale { .. }) {
+        account
+            .usage
+            .as_ref()
+            .map(|usage| format!("Last fetched at {}", format::local_time(usage.fetched_at, panel.now, &panel.zone)))
+    } else {
+        None
+    };
+    let details = format::account_details(account, provider, panel.now)
+        .into_iter()
+        .map(|(detail, tone)| {
+            let tip = if tone == Tone::Warning { stale_tip.clone() } else { None };
+            (detail, tone, tip)
+        })
+        .collect();
+    let name_tip = format::account_tooltip(account, panel.now, &panel.zone);
     let prompt = panel.prompt.as_ref().filter(|prompt| match prompt {
         Prompt::Rename(id) | Prompt::Remove(id) => *id == account.id,
     });
@@ -1018,7 +1097,7 @@ fn account_row(account: &Account, provider: &ProviderState, panel: &Panel, palet
     let header = match prompt {
         Some(Prompt::Rename(_)) => rename_header(account, panel, palette),
         Some(Prompt::Remove(_)) => remove_header(account, name_color, panel, palette),
-        None => card_header(account.label(), name_color, details, palette).children(account_control(
+        None => card_header(account.label(), name_color, &name_tip, details, palette).children(account_control(
             account,
             provider,
             failure.is_some(),
@@ -1045,12 +1124,22 @@ fn account_row(account: &Account, provider: &ProviderState, panel: &Panel, palet
     }
     if let Some(usage) = account.usage.as_ref().filter(|usage| !usage.windows.is_empty()) {
         let current = account.status == AccountStatus::Ready && account.enabled && panel.connected;
+        let dimmed_reason = if !panel.connected {
+            Some("Server offline")
+        } else if matches!(account.status, AccountStatus::Stale { .. }) {
+            Some("Usage may be out of date")
+        } else if !account.enabled {
+            Some("Account is paused for auto-switch")
+        } else {
+            None
+        };
         let gap = match panel.preferences.usage_style {
             UsageStyle::Bars => 0.0,
             UsageStyle::Rings => 8.0,
             UsageStyle::Pills => 12.0,
         };
-        let rows = usage.windows.iter().map(|window| usage_row(window, current, panel, palette));
+        let rows =
+            usage.windows.iter().map(|window| usage_row(&account.id, window, current, dimmed_reason, panel, palette));
         block = block.child(col().gap(gap).children(rows));
     }
     let available_resets: Vec<&LimitReset> = account.resets.iter().filter(|reset| reset.available(panel.now)).collect();
@@ -1137,7 +1226,7 @@ fn rename_header(account: &Account, panel: &Panel, palette: &Palette) -> El {
 }
 
 fn remove_header(account: &Account, name_color: Color, panel: &Panel, palette: &Palette) -> El {
-    card_header(account.label(), name_color, Vec::new(), palette)
+    card_header(account.label(), name_color, &[], Vec::new(), palette)
         .child(cancel(palette))
         .child(remove_button(account, panel, palette))
 }
@@ -1165,6 +1254,7 @@ fn resets_row(account: &Account, resets: &[&LimitReset], panel: &Panel, palette:
     let chevron = if expanded { &icons::CHEVRON_UP } else { &icons::CHEVRON_DOWN };
     let id = account.id.clone();
     let label = format!("{total} available");
+    let pill_tip = if expanded { "Hide limit resets" } else { "Show limit resets" };
     let pill = row()
         .key(format!("resets-toggle-{}", account.id))
         .role("button")
@@ -1179,6 +1269,7 @@ fn resets_row(account: &Account, resets: &[&LimitReset], panel: &Panel, palette:
         .fill(palette.button)
         .border(1.0, palette.button_border)
         .hover_fill(palette.hover)
+        .help(pill_tip)
         .on_press_tx(move |panel: &mut Panel, _| panel.toggle_resets(id.clone()))
         .child(text(label).font(SMALL).color(palette.text).nowrap())
         .child(icon(chevron, 10.0).color(palette.secondary));
@@ -1236,6 +1327,12 @@ fn reset_grant_row(account: &Account, reset: &LimitReset, panel: &Panel, palette
         .gap(1.0)
         .child(title_row)
         .child(text(subtitle).font(SMALL).color(palette.secondary).truncate());
+    let mut info_tips =
+        vec![reset.detail.as_deref().unwrap_or("Refills your usage limit now. This cannot be undone.").to_owned()];
+    if let Some(expires_at) = reset.expires_at {
+        info_tips.push(format!("Expires {}", format::reset_expiry_date(expires_at, &panel.zone)));
+    }
+    let info = help_rows(info, &info_tips);
     let mut top = row().gap(8.0).center_y().child(badge).child(info);
     if !confirming && reset.usable {
         let key = format!("reset-use-{}-{}", account.id, reset.id);
@@ -1244,8 +1341,10 @@ fn reset_grant_row(account: &Account, reset: &LimitReset, panel: &Panel, palette
             button(key, "Resetting", &description, Look::Busy, palette).disabled(true)
         } else {
             let btn = button(key, "Use", &description, Look::Plain, palette);
-            if !panel.connected || panel.any_resetting() {
-                disable(btn)
+            if !panel.connected {
+                disable(btn).help("Server offline")
+            } else if panel.any_resetting() {
+                disable(btn).help("Another reset is in progress")
             } else {
                 let (account_id, grant_id) = (account.id.clone(), reset.id.clone());
                 btn.on_press_tx(move |panel: &mut Panel, _| {
@@ -1272,8 +1371,10 @@ fn reset_grant_row(account: &Account, reset: &LimitReset, panel: &Panel, palette
                 Look::Primary,
                 palette,
             );
-            if !panel.connected || panel.any_resetting() {
-                disable(btn)
+            if !panel.connected {
+                disable(btn).help("Server offline")
+            } else if panel.any_resetting() {
+                disable(btn).help("Another reset is in progress")
             } else {
                 let (account_id, grant_id) = (account.id.clone(), reset.id.clone());
                 btn.on_press_tx(move |panel: &mut Panel, _| {
@@ -1296,19 +1397,24 @@ fn switch_button(account: &Account, failed: bool, panel: &Panel, palette: &Palet
     }
     let label = if failed { "Try again" } else { "Switch" };
     let button = button(key, label, &description, Look::Plain, palette);
-    if panel.switching() || !panel.connected {
-        return disable(button);
+    if !panel.connected {
+        return disable(button).help("Server offline");
+    }
+    if panel.switching() {
+        return disable(button).help("Another switch is in progress");
     }
     let id = account.id.clone();
     button.on_press_tx(move |panel: &mut Panel, _| panel.activate(id.clone()))
 }
 
 struct Meter<'a> {
+    account_id: &'a str,
     window: &'a UsageWindow,
     used: Option<f64>,
     shown: Option<f64>,
     left: bool,
     opacity: f32,
+    dimmed_reason: Option<&'a str>,
 }
 
 impl Meter<'_> {
@@ -1332,13 +1438,37 @@ impl Meter<'_> {
         let reset = format::reset_time(self.window, panel.now, &panel.zone, panel.exact_resets)?;
         Some(if panel.exact_resets { reset } else { format!("Resets in {reset}") })
     }
+
+    fn meter_key(&self) -> String {
+        format!("meter-{}-{}", self.account_id, self.window.id)
+    }
+
+    fn reset_key(&self) -> String {
+        format!("reset-{}-{}", self.account_id, self.window.id)
+    }
+
+    fn tooltip(&self, panel: &Panel) -> Vec<String> {
+        format::window_tooltip(self.window, panel.preferences.usage_shown, panel.now, self.dimmed_reason)
+    }
+
+    fn reset_tooltip(&self, panel: &Panel) -> Option<String> {
+        format::reset_tooltip(self.window, panel.now, &panel.zone, panel.exact_resets)
+    }
 }
 
-fn usage_row(window: &UsageWindow, current: bool, panel: &Panel, palette: &Palette) -> El {
+fn usage_row(
+    account_id: &str,
+    window: &UsageWindow,
+    current: bool,
+    dimmed_reason: Option<&str>,
+    panel: &Panel,
+    palette: &Palette,
+) -> El {
     let used = window.used_percent.filter(|used| used.is_finite()).map(|used| used.clamp(0.0, 100.0));
     let left = panel.preferences.usage_shown == UsageShown::Left;
     let shown = used.map(|used| if left { 100.0 - used } else { used });
-    let meter = Meter { window, used, shown, left, opacity: if current { 1.0 } else { DIMMED } };
+    let meter =
+        Meter { account_id, window, used, shown, left, opacity: if current { 1.0 } else { DIMMED }, dimmed_reason };
     match panel.preferences.usage_style {
         UsageStyle::Bars => bar_row(&meter, panel, palette),
         UsageStyle::Rings => ring_row(&meter, panel, palette),
@@ -1365,25 +1495,42 @@ fn bar_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
     if let Some(pace) = meter.pace(panel) {
         bar = bar.child(pace_tick(pace, palette));
     }
+    let bar = help_rows(bar.key(meter.meter_key()), &meter.tooltip(panel));
     let reset = format::reset_time(meter.window, panel.now, &panel.zone, panel.exact_resets)
         .or_else(|| meter.used.is_none().then(|| "No data".to_owned()))
         .unwrap_or_default();
+    let mut reset_el = right(74.0, text(reset).font(RESET).color(palette.secondary).nowrap());
+    if let Some(tip) = meter.reset_tooltip(panel) {
+        reset_el = reset_el.key(meter.reset_key()).help(tip);
+    }
     let percent_color = if meter.used.is_some() { palette.text } else { palette.secondary };
     row()
         .h(20.0)
         .gap(8.0)
         .center_y()
-        .child(text(&meter.window.label).font(BODY).color(palette.secondary).truncate().w(64.0))
+        .child(
+            text(&meter.window.label)
+                .font(BODY)
+                .color(palette.secondary)
+                .truncate()
+                .w(64.0)
+                .help_when_truncated(&meter.window.label),
+        )
         .child(bar)
         .child(right(36.0, text(format::percent(meter.shown)).font(PERCENT).color(percent_color).nowrap()))
-        .child(right(74.0, text(reset).font(RESET).color(palette.secondary).nowrap()))
+        .child(reset_el)
 }
 
 fn pill_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
-    let mut top = row()
-        .gap(6.0)
-        .center_y()
-        .child(text(&meter.window.label).font(SECTION).color(palette.text).truncate().shrink().min_w(0.0));
+    let mut top = row().gap(6.0).center_y().child(
+        text(&meter.window.label)
+            .font(SECTION)
+            .color(palette.text)
+            .truncate()
+            .shrink()
+            .min_w(0.0)
+            .help_when_truncated(&meter.window.label),
+    );
     let mut bar = meter.progress(row().w_full().h(6.0).opacity(meter.opacity));
     match (meter.used, meter.shown) {
         (Some(used), Some(shown)) => {
@@ -1416,19 +1563,29 @@ fn pill_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
     if let Some(pace) = meter.pace(panel) {
         bar = bar.child(pace_tick(pace, palette));
     }
+    let bar = help_rows(bar.key(meter.meter_key()), &meter.tooltip(panel));
     let reset = meter.resets(panel).or_else(|| (meter.used == Some(0.0)).then(|| "Not used yet".to_owned()));
     top = top.child(el().grow(1.0));
     if let Some(reset) = reset {
-        top = top.child(text(reset).font(RESET).color(palette.secondary).nowrap());
+        let mut reset_el = text(reset).font(RESET).color(palette.secondary).nowrap();
+        if let Some(tip) = meter.reset_tooltip(panel) {
+            reset_el = reset_el.key(meter.reset_key()).help(tip);
+        }
+        top = top.child(reset_el);
     }
     col().gap(7.0).child(top).child(bar)
 }
 
 fn ring_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
-    let mut info =
-        col().grow(1.0).min_w(0.0).gap(2.0).child(text(&meter.window.label).font(BODY).color(palette.text).truncate());
+    let mut info = col().grow(1.0).min_w(0.0).gap(2.0).child(
+        text(&meter.window.label).font(BODY).color(palette.text).truncate().help_when_truncated(&meter.window.label),
+    );
     if let Some(reset) = meter.resets(panel) {
-        info = info.child(text(reset).font(RESET).color(palette.secondary).truncate());
+        let mut reset_el = text(reset).font(RESET).color(palette.secondary).truncate();
+        if let Some(tip) = meter.reset_tooltip(panel) {
+            reset_el = reset_el.key(meter.reset_key()).help(tip);
+        }
+        info = info.child(reset_el);
     }
     let (label, arc) = match (meter.used, meter.shown) {
         (Some(used), Some(shown)) => {
@@ -1439,9 +1596,16 @@ fn ring_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
     };
     let ring = canvas(ring(arc, meter.pace(panel), palette)).size(RING_BOX, RING_BOX);
     let ring = meter.progress(el().size(RING_BOX, RING_BOX).opacity(meter.opacity)).child(ring);
-    row().gap(8.0).center_y().child(info).child(
-        row().gap(6.0).center_y().child(text(label).font(RING_PERCENT).color(palette.secondary).nowrap()).child(ring),
-    )
+    let meter_el = help_rows(
+        row()
+            .key(meter.meter_key())
+            .gap(6.0)
+            .center_y()
+            .child(text(label).font(RING_PERCENT).color(palette.secondary).nowrap())
+            .child(ring),
+        &meter.tooltip(panel),
+    );
+    row().gap(8.0).center_y().child(info).child(meter_el)
 }
 
 fn ring(arc: Option<(f64, Color)>, pace: Option<f64>, palette: &Palette) -> Shape {
@@ -1476,18 +1640,18 @@ fn right(width: f32, child: El) -> El {
     row().w(width).justify_end().child(child)
 }
 
-fn footer(panel: &Panel, settings: &Settings, palette: &Palette) -> El {
+fn footer(panel: &Panel, snapshot: &Snapshot, palette: &Palette) -> El {
     let mut controls = row().h(44.0).px(14.0).gap(8.0).center_y().child(refresh(panel, palette)).child(el().grow(1.0));
     if panel.connected {
-        let label = format!("Auto-switch at {}", format::percent(Some(settings.threshold)));
-        controls = controls.child(text(&label).font(BODY).color(palette.text).nowrap()).child(auto_switch(
-            &label,
-            settings.auto_switch,
-            palette,
-        ));
+        let label = format!("Auto-switch at {}", format::percent(Some(snapshot.settings.threshold)));
+        let auto_tip = format::auto_switch_tooltip(snapshot, panel.now);
+        let auto_label = help_rows(text(&label).font(BODY).color(palette.text).nowrap(), &auto_tip).help_above();
+        let auto_toggle =
+            help_rows(auto_switch(&label, snapshot.settings.auto_switch, palette), &auto_tip).help_above();
+        controls = controls.child(auto_label).child(auto_toggle);
     }
     col().child(el().w_full().h(1.0).fill(palette.separator)).child(controls.child(more(
-        settings.threshold,
+        snapshot.settings.threshold,
         panel.connected,
         palette,
     )))
@@ -1500,6 +1664,15 @@ fn refresh(panel: &Panel, palette: &Palette) -> El {
         let age = panel.last_update().map(|updated| format::age(updated, panel.now));
         (age.unwrap_or_else(|| "Refresh".to_owned()), icon(&icons::REFRESH, 14.0))
     };
+    let tip = if panel.refreshing() {
+        "Refreshing usage".to_owned()
+    } else if !panel.connected {
+        "Server offline".to_owned()
+    } else if let Some(updated) = panel.last_update() {
+        format!("Refresh usage - last updated {}", format::local_time(updated, panel.now, &panel.zone))
+    } else {
+        "Refresh usage".to_owned()
+    };
     let control = row()
         .key("refresh")
         .role("button")
@@ -1509,6 +1682,8 @@ fn refresh(panel: &Panel, palette: &Palette) -> El {
         .gap(6.0)
         .center_y()
         .radius(6.0)
+        .help(tip)
+        .help_above()
         .child(mark.color(palette.secondary))
         .child(text(label).font(BODY).color(palette.secondary).nowrap());
     if panel.refreshing() {
@@ -1568,6 +1743,8 @@ fn more(threshold: f64, connected: bool, palette: &Palette) -> El {
         .center()
         .radius(6.0)
         .hover_fill(palette.hover)
+        .help("Threshold, settings, and quit")
+        .help_above()
         .on_press_tx(move |_: &mut Panel, tx| {
             tx.popup_menu(more_menu(threshold, connected), "more", |panel: &mut Panel, picked, tx| {
                 if let Some(id) = picked {

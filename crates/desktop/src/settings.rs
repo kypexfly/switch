@@ -1,11 +1,12 @@
-use rune::{Cursor, El, Key, KeyEvent, PopupItem, PopupMenu, TextStyle, col, el, icon, row, text, text_input};
-use switch_protocol::{Account, AccountUpdate, ProviderState, Snapshot, Strategy, UsageWindow};
+use rune::{Cursor, El, Key, KeyEvent, PopupItem, PopupMenu, Side, TextStyle, col, el, icon, row, text, text_input};
+use switch_protocol::{Account, AccountStatus, AccountUpdate, ProviderState, Snapshot, Strategy, UsageWindow};
 
 use crate::format;
 use crate::icons;
 use crate::panel::{
     BODY, DISABLED, Look, NAME, Palette, Panel, Prompt, SECTION, SMALL, Task, button, cancel, disable,
-    dismissible_notice, drag_handle, empty, movable, note, notice, remove_button, sign_in_button, sign_in_hint, toggle,
+    dismissible_notice, drag_handle, empty, help_rows, movable, note, notice, remove_button, sign_in_button,
+    sign_in_hint, toggle,
 };
 use crate::preferences::{
     AccountScope, NotificationPreferences, Place, ResetTrigger, UsageShown, UsageStyle, WindowScope, provider_windows,
@@ -52,18 +53,17 @@ pub fn header(panel: &Panel, palette: &Palette) -> El {
         .center()
         .radius(6.0)
         .hover_fill(palette.hover)
+        .help("Back")
+        .help_keys(["Esc"])
+        .help_side(Side::Bottom)
         .on_press_tx(|panel: &mut Panel, _| {
             panel.go_back();
         })
         .child(icon(&icons::BACK, 16.0).color(palette.text));
-    let bar = row()
-        .h(43.0)
-        .pl(10.0)
-        .pr(14.0)
-        .gap(4.0)
-        .center_y()
-        .child(back)
-        .child(text(title).font(NAME).color(palette.text).truncate().shrink().min_w(0.0));
+    let bar =
+        row().h(43.0).pl(10.0).pr(14.0).gap(4.0).center_y().child(back).child(
+            text(title).font(NAME).color(palette.text).truncate().shrink().min_w(0.0).help_when_truncated(title),
+        );
     col().child(bar).child(el().w_full().h(1.0).fill(palette.separator))
 }
 
@@ -220,21 +220,25 @@ fn auto_switch_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> Ve
     let auto_toggle = if connected {
         auto_toggle.on_press_tx(move |panel: &mut Panel, _| panel.set_auto_switch(!enabled))
     } else {
-        disable(auto_toggle)
+        disable(auto_toggle).help("Server offline")
     };
 
     let threshold = settings.threshold;
     let lower = button("threshold-down".to_owned(), "-", "Decrease threshold", Look::Plain, palette);
-    let lower = if connected && threshold > 50.0 {
+    let lower = if !connected {
+        disable(lower).help("Server offline")
+    } else if threshold > 50.0 {
         lower.on_press_tx(move |panel: &mut Panel, _| panel.set_threshold((threshold - 5.0).max(50.0)))
     } else {
-        disable(lower)
+        disable(lower).help("Minimum threshold is 50%")
     };
     let raise = button("threshold-up".to_owned(), "+", "Increase threshold", Look::Plain, palette);
-    let raise = if connected && threshold < 100.0 {
+    let raise = if !connected {
+        disable(raise).help("Server offline")
+    } else if threshold < 100.0 {
         raise.on_press_tx(move |panel: &mut Panel, _| panel.set_threshold((threshold + 5.0).min(100.0)))
     } else {
-        disable(raise)
+        disable(raise).help("Maximum threshold is 100%")
     };
     let threshold_controls = row()
         .gap(6.0)
@@ -261,7 +265,7 @@ fn auto_switch_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> Ve
             });
         })
     } else {
-        disable(cooldown_btn)
+        disable(cooldown_btn).help("Server offline")
     };
 
     let strategy = settings.strategy;
@@ -279,18 +283,24 @@ fn auto_switch_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> Ve
             });
         })
     } else {
-        disable(strategy_btn)
+        disable(strategy_btn).help("Server offline")
     };
 
     let mut items = vec![
         group(palette)
             .child(setting("Auto-switch", auto_toggle, palette))
             .child(divider(palette))
-            .child(setting("Threshold", threshold_controls, palette))
+            .child(
+                setting("Threshold", threshold_controls, palette)
+                    .help("Switch when any primary window reaches this limit and another account is at least 5% lower"),
+            )
             .child(divider(palette))
-            .child(setting("Cooldown", cooldown_btn, palette))
+            .child(setting("Cooldown", cooldown_btn, palette).help("Minimum wait between automatic switches"))
             .child(divider(palette))
-            .child(setting("Strategy", strategy_btn, palette)),
+            .child(
+                setting("Strategy", strategy_btn, palette)
+                    .help("Best picks the lowest peak usage; Next picks the next account in list order"),
+            ),
     ];
 
     let switchable: Vec<&ProviderState> = snapshot.providers.iter().filter(|p| p.switchable).collect();
@@ -317,9 +327,15 @@ fn auto_switch_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> Ve
                     panel.update_account(id.clone(), AccountUpdate { alias: None, enabled: Some(!account_enabled) });
                 })
             } else {
-                disable(control)
+                disable(control).help("Server offline")
             };
-            group_el = group_el.child(setting(&label, control, palette));
+            let row = setting(&label, control, palette);
+            let row = if account.status == AccountStatus::NeedsLogin {
+                row.help("Signed out - skipped until signed in again")
+            } else {
+                row
+            };
+            group_el = group_el.child(row);
         }
         items.push(group_el);
     }
@@ -431,9 +447,13 @@ fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> 
     let general = group(palette)
         .child(setting("Notifications", master, palette))
         .child(divider(palette))
-        .child(disable_if(sound, !enabled))
+        .child(if enabled { sound } else { disable(sound).help("Turn on Notifications first") })
         .child(divider(palette))
-        .child(disable_if(setting("Test notification", test_btn, palette), !enabled));
+        .child(if enabled {
+            setting("Test notification", test_btn, palette)
+        } else {
+            disable(setting("Test notification", test_btn, palette)).help("Turn on Notifications first")
+        });
 
     let threshold = prefs.warning_threshold;
     let warn_enabled = enabled && prefs.usage_warning;
@@ -444,7 +464,7 @@ fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> 
                 panel.edit_preferences(|all| all.notifications.warning_threshold = threshold.saturating_sub(5).max(50));
             })
         } else {
-            disable(warn_down)
+            disable(warn_down).help("Minimum is 50%")
         }
     } else {
         warn_down.disabled(true)
@@ -456,7 +476,7 @@ fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> 
                 panel.edit_preferences(|all| all.notifications.warning_threshold = (threshold + 5).min(95));
             })
         } else {
-            disable(warn_up)
+            disable(warn_up).help("Maximum is 95%")
         }
     } else {
         warn_up.disabled(true)
@@ -467,8 +487,11 @@ fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> 
         .child(warn_down)
         .child(text(format!("{threshold}%")).font(BODY).color(palette.text).nowrap())
         .child(warn_up);
-    let threshold_row =
-        disable_if(setting("Warning threshold", threshold_controls, palette), enabled && !prefs.usage_warning);
+    let threshold_row = if enabled && !prefs.usage_warning {
+        disable(setting("Warning threshold", threshold_controls, palette)).help("Turn on Usage warning first")
+    } else {
+        setting("Warning threshold", threshold_controls, palette)
+    };
 
     let reset_trigger = prefs.reset_trigger;
     let reset_enabled = enabled && prefs.limit_reset;
@@ -487,7 +510,11 @@ fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> 
                 .item(PopupItem::new("notify-reset:any", "Any usage").checked(reset_trigger == ResetTrigger::Any))
         },
     );
-    let reset_trigger_row = disable_if(setting("Reset trigger", reset_btn, palette), enabled && !prefs.limit_reset);
+    let reset_trigger_row = if enabled && !prefs.limit_reset {
+        disable(setting("Reset trigger", reset_btn, palette)).help("Turn on Limit reset first")
+    } else {
+        setting("Reset trigger", reset_btn, palette)
+    };
 
     let events = group(palette)
         .child(notify_toggle("notify-auto-switch", "Auto-switch", prefs.auto_switch, enabled, palette, |n, v| {
@@ -548,22 +575,30 @@ fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> 
                 )
         },
     );
-    let scope = group(palette).child(setting("Windows", windows_btn, palette)).child(divider(palette)).child(setting(
-        "Accounts",
-        accounts_btn,
-        palette,
-    ));
+    let windows_row = setting("Windows", windows_btn, palette);
+    let windows_row = if enabled {
+        windows_row.help("Primary windows are account-wide limits, excluding model-specific limits")
+    } else {
+        windows_row
+    };
+    let accounts_row = setting("Accounts", accounts_btn, palette);
+    let accounts_row = if enabled {
+        accounts_row.help("Choose whether notifications fire for all accounts or only the active one")
+    } else {
+        accounts_row
+    };
+    let scope = group(palette).child(windows_row).child(divider(palette)).child(accounts_row);
 
     let mut items = vec![
         general,
         section_label("Events", enabled, palette),
-        disable_if(events, !enabled),
+        if enabled { events } else { disable(events).help("Turn on Notifications first") },
         disable_if(
             notes(note("After 100% only alerts when a blocked window becomes usable again.", palette.secondary)),
             !enabled,
         ),
         section_label("Scope", enabled, palette),
-        disable_if(scope, !enabled),
+        if enabled { scope } else { disable(scope).help("Turn on Notifications first") },
         disable_if(
             notes(note("Usage-only providers are always included under Active only.", palette.secondary)),
             !enabled,
@@ -592,7 +627,7 @@ fn notifications_page(snapshot: &Snapshot, panel: &Panel, palette: &Palette) -> 
                 n.set_account(&id, v);
             }));
         }
-        items.push(disable_if(group_el, !enabled));
+        items.push(if enabled { group_el } else { disable(group_el).help("Turn on Notifications first") });
     }
 
     items
@@ -604,6 +639,7 @@ fn notes(note: El) -> El {
 
 fn preview(panel: &Panel, snapshot: &Snapshot, palette: &Palette) -> El {
     let groups = status::tray_groups(Some(snapshot), &panel.preferences);
+    let tips = status::tray_preview_tooltips(snapshot, &panel.preferences, panel.now);
     row()
         .key("preview")
         .h(40.0)
@@ -622,20 +658,21 @@ fn preview(panel: &Panel, snapshot: &Snapshot, palette: &Palette) -> El {
                 .justify_end()
                 .center_y()
                 .gap(11.0)
-                .children(groups.iter().map(|group| tray_group(group, palette))),
+                .children(groups.iter().zip(tips.iter()).map(|(group, tips)| tray_group(group, tips, palette))),
         )
 }
 
-fn tray_group(group: &TrayGroup, palette: &Palette) -> El {
+fn tray_group(group: &TrayGroup, tips: &[String], palette: &Palette) -> El {
     let mark = match icons::provider_mark(&group.provider) {
         Some(mark) => icon(mark, 16.0).color(palette.text),
         None if group.provider.is_empty() => icon(&icons::SWITCH, 20.0).color(palette.text),
         None => el().size(15.0, 15.0).radius(7.5).fill(palette.text),
     };
-    let columns = group.columns.iter().map(|column| {
+    let columns = group.columns.iter().enumerate().map(|(index, column)| {
         let font = if column.values.len() == 1 { TRAY_SINGLE } else { TRAY_ROW };
         let values = column.values.iter().map(|value| text(value).font(font).color(palette.text).nowrap());
-        col().items_end().opacity(if column.active { 1.0 } else { TRAY_INACTIVE }).children(values)
+        let col_el = col().items_end().opacity(if column.active { 1.0 } else { TRAY_INACTIVE }).children(values);
+        if let Some(tip) = tips.get(index).filter(|tip| !tip.is_empty()) { col_el.help(tip) } else { col_el }
     });
     let mut shown = row().gap(4.0).center_y().child(mark);
     if !group.columns.is_empty() {
@@ -678,6 +715,13 @@ fn provider_row(provider: &ProviderState, panel: &Panel, palette: &Palette) -> E
         check_cell(format!("{}-{place:?}", provider.id), &label, on, width, palette)
             .on_press(move |panel: &mut Panel| panel.edit_preferences(|all| all.set_provider(place, &id, !on)))
     };
+    let provider_name = text(&provider.name)
+        .font(SECTION)
+        .color(palette.text)
+        .truncate()
+        .grow(1.0)
+        .min_w(0.0)
+        .help_when_truncated(&provider.name);
     let row = row()
         .key(format!("settings-header-{}", provider.id))
         .h(ROW)
@@ -685,7 +729,7 @@ fn provider_row(provider: &ProviderState, panel: &Panel, palette: &Palette) -> E
         .center_y()
         .child(grip(List::Providers, &provider.id, &provider.name, panel, palette))
         .child(row().w(HANDLE).center_y().child(mark))
-        .child(opener(&page, text(&provider.name).font(SECTION).color(palette.text).truncate().grow(1.0).min_w(0.0)))
+        .child(opener(&page, provider_name))
         .child(check(Place::Panel, PANEL_COLUMN))
         .child(check(Place::MenuBar, MENU_BAR_COLUMN))
         .child(open_button(&provider.id, &provider.name, page, palette));
@@ -695,13 +739,23 @@ fn provider_row(provider: &ProviderState, panel: &Panel, palette: &Palette) -> E
 fn account_row(account: &Account, provider: &ProviderState, list: &List, panel: &Panel, palette: &Palette) -> El {
     let page = Page::Account(account.id.clone());
     let name = if account.enabled { palette.text } else { palette.secondary };
-    let mut names = col()
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(1.0)
-        .child(text(account.label()).font(NAME).color(name).truncate().w_full().min_w(0.0));
+    let name_text = text(account.label()).font(NAME).color(name).truncate().w_full().min_w(0.0);
+    let name_text = if account.alias.is_some() || account.identity.organization.is_some() {
+        help_rows(name_text, &format::account_tooltip(account, panel.now, &panel.zone))
+    } else {
+        name_text.help_when_truncated(account.label())
+    };
+    let mut names = col().grow(1.0).min_w(0.0).gap(1.0).child(name_text);
     if let Some(summary) = format::account_summary(account, provider) {
-        names = names.child(text(summary).font(SMALL).color(palette.secondary).truncate().w_full().min_w(0.0));
+        names = names.child(
+            text(&summary)
+                .font(SMALL)
+                .color(palette.secondary)
+                .truncate()
+                .w_full()
+                .min_w(0.0)
+                .help_when_truncated(&summary),
+        );
     }
     let check = |place: Place, width: f32| {
         let id = account.id.clone();
@@ -709,8 +763,13 @@ fn account_row(account: &Account, provider: &ProviderState, list: &List, panel: 
         let label = format!("Show {} in {}", account.label(), place_name(place));
         let cell = check_cell(format!("{}-{place:?}", account.id), &label, on, width, palette);
         if !panel.preferences.provider_on(place, &provider.id) {
-            return disable(cell);
+            return disable(cell).help(format!("Turn on {} in {} first", provider.name, place_name(place)));
         }
+        let cell = if place == Place::Panel && account.active {
+            cell.help("Active account always stays shown in the panel")
+        } else {
+            cell
+        };
         cell.on_press(move |panel: &mut Panel| panel.edit_preferences(|all| all.set_account(place, &id, !on)))
     };
     let row = row()
@@ -744,9 +803,17 @@ fn grip(list: List, id: &str, name: &str, panel: &Panel, palette: &Palette) -> E
         .label(format!("Move {name}, Option and arrow keys"))
         .child(icon(&icons::GRIP, 14.0).color(palette.secondary));
     if !panel.connected {
-        return disable(slot);
+        return disable(slot).help("Server offline");
     }
-    drag_handle(slot.focusable(true).cursor(Cursor::Grab), list, id)
+    drag_handle(
+        slot.focusable(true)
+            .cursor(Cursor::Grab)
+            .help("Drag to reorder")
+            .help_row("Move with keyboard")
+            .help_keys(["Option", "Up/Down"]),
+        list,
+        id,
+    )
 }
 
 fn moved_by_keys(row: El, list: List, id: &str) -> El {
@@ -784,6 +851,7 @@ fn open_button(id: &str, name: &str, page: Page, palette: &Palette) -> El {
         .h_full()
         .center_y()
         .justify_end()
+        .help(format!("Settings for {name}"))
         .on_press_tx(move |panel: &mut Panel, _| panel.open(page.clone()))
         .child(icon(&icons::OPEN, 14.0).color(palette.secondary))
 }
@@ -816,7 +884,7 @@ fn setting(label: &str, control: El, palette: &Palette) -> El {
         .px(12.0)
         .gap(8.0)
         .center_y()
-        .child(text(label).font(BODY).color(palette.text).truncate().grow(1.0).min_w(0.0))
+        .child(text(label).font(BODY).color(palette.text).truncate().grow(1.0).min_w(0.0).help_when_truncated(label))
         .child(control)
 }
 
@@ -870,7 +938,11 @@ fn window_row(window: &UsageWindow, on: bool, provider: &ProviderState, panel: &
         .label(label)
         .checked(on);
     if !panel.preferences.can_toggle_tray_window(provider, &window.id) {
-        return if on { row.disabled(true) } else { disable(row) };
+        return if on {
+            row.disabled(true).help("At least one window must stay selected")
+        } else {
+            disable(row).help("Uncheck another window first (maximum 2)")
+        };
     }
     let (provider, window) = (provider.id.clone(), window.id.clone());
     row.focusable(true).on_press(move |panel: &mut Panel| panel.toggle_tray_window(&provider, &window))
@@ -882,9 +954,14 @@ fn account_page(account: &Account, provider: &ProviderState, panel: &Panel, pale
         let on = panel.preferences.account_on(place, &account.id);
         let control = toggle(&format!("show-{place:?}"), label, on, palette);
         let control = if panel.preferences.provider_on(place, &provider.id) {
+            let control = if place == Place::Panel && account.active {
+                control.help("Active account always stays shown in the panel")
+            } else {
+                control
+            };
             control.on_press(move |panel: &mut Panel| panel.edit_preferences(|all| all.set_account(place, &id, !on)))
         } else {
-            disable(control)
+            disable(control).help(format!("Turn on {} in {} first", provider.name, place_name(place)))
         };
         setting(label, control, palette)
     };
@@ -903,7 +980,7 @@ fn account_page(account: &Account, provider: &ProviderState, panel: &Panel, pale
                 panel.update_account(id.clone(), AccountUpdate { alias: None, enabled: Some(!enabled) });
             })
         } else {
-            disable(control)
+            disable(control).help("Server offline")
         };
         items.push(group(palette).child(setting("Use for auto-switch", control, palette)));
         let paused = "Turning this off pauses the account. You can still switch to it yourself.";
@@ -920,7 +997,7 @@ fn account_page(account: &Account, provider: &ProviderState, panel: &Panel, pale
         let remove = if panel.connected {
             remove.on_press_tx(move |panel: &mut Panel, _| panel.prompt = Some(Prompt::Remove(id.clone())))
         } else {
-            disable(remove)
+            disable(remove).help("Server offline")
         };
         items.push(group(palette).child(setting("Saved login", remove, palette)));
     }
@@ -935,7 +1012,8 @@ fn name_field(account: &Account, panel: &Panel, palette: &Palette) -> El {
         return frame(
             row().child(text(account.label()).font(BODY).color(palette.text).truncate().grow(1.0).min_w(0.0)),
         )
-        .opacity(DISABLED);
+        .opacity(DISABLED)
+        .help("Server offline");
     }
     let border = if panel.draft.focused { palette.accent } else { palette.button_border };
     frame(text_input(&panel.draft, BODY).single_line().key("name"))

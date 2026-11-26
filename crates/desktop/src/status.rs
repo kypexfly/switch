@@ -1,9 +1,9 @@
 use jiff::Timestamp;
 use rune::TrayItem;
-use switch_protocol::{Account, ProviderState, Snapshot, UsageWindow};
+use switch_protocol::{Account, AccountStatus, ProviderState, Snapshot, UsageWindow};
 
 use crate::format;
-use crate::preferences::{Place, Preferences};
+use crate::preferences::{Place, Preferences, UsageShown};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrayGroup {
@@ -46,22 +46,59 @@ fn account_windows(account: &Account) -> impl Iterator<Item = &UsageWindow> {
     account.usage.iter().flat_map(|usage| &usage.windows)
 }
 
-pub fn tooltip(snapshot: Option<&Snapshot>, preferences: &Preferences, now: Timestamp) -> String {
+fn account_tray_tooltip(account: &Account, shown: &[String], usage_shown: UsageShown, now: Timestamp) -> String {
+    let mut tags = Vec::new();
+    if account.active {
+        tags.push("active");
+    }
+    match account.status {
+        AccountStatus::NeedsLogin => tags.push("signed out"),
+        AccountStatus::Stale { .. } => tags.push("stale"),
+        AccountStatus::Pending | AccountStatus::Ready => {}
+    }
+    if !account.enabled {
+        tags.push("paused");
+    }
+    let label =
+        if tags.is_empty() { account.label().to_owned() } else { format!("{} ({})", account.label(), tags.join(", ")) };
+    let windows: Vec<String> = account_windows(account)
+        .filter(|window| shown.contains(&window.id))
+        .map(|window| format::window_summary(window, usage_shown, now))
+        .collect();
+    if windows.is_empty() { label } else { format!("{label} - {}", windows.join("; ")) }
+}
+
+pub fn tooltip(snapshot: Option<&Snapshot>, preferences: &Preferences, connected: bool, now: Timestamp) -> String {
     let providers = snapshot.map_or(&[][..], |snapshot| &snapshot.providers);
     let mut lines = Vec::new();
     for provider in providers {
         let shown = preferences.tray_windows(provider);
         for account in preferences.tray_accounts(provider) {
-            let label =
-                if account.active { format!("{} (active)", account.label()) } else { account.label().to_owned() };
-            let windows: Vec<String> = account_windows(account)
-                .filter(|window| shown.contains(&window.id))
-                .map(|window| format::window_summary(window, now))
-                .collect();
-            lines.push(if windows.is_empty() { label } else { format!("{label} - {}", windows.join("; ")) });
+            lines.push(account_tray_tooltip(account, &shown, preferences.usage_shown, now));
         }
     }
+    if !connected && snapshot.is_some() {
+        lines.push("Server offline".to_owned());
+    }
     if lines.is_empty() { "Switch".to_owned() } else { lines.join("\n") }
+}
+
+pub fn tray_preview_tooltips(snapshot: &Snapshot, preferences: &Preferences, now: Timestamp) -> Vec<Vec<String>> {
+    let without_accounts = snapshot.providers.iter().all(|provider| provider.accounts.is_empty());
+    let groups: Vec<Vec<String>> = snapshot
+        .providers
+        .iter()
+        .filter(|provider| preferences.provider_on(Place::MenuBar, &provider.id))
+        .map(|provider| {
+            let shown = preferences.tray_windows(provider);
+            preferences
+                .tray_accounts(provider)
+                .map(|account| account_tray_tooltip(account, &shown, preferences.usage_shown, now))
+                .collect::<Vec<_>>()
+        })
+        .filter(|columns| without_accounts || !columns.is_empty())
+        .collect();
+    if groups.is_empty() { vec![Vec::new()] } else { groups }
 }
 
 pub fn menu(snapshot: Option<&Snapshot>, preferences: &Preferences, connected: bool) -> Vec<TrayItem> {
@@ -155,12 +192,29 @@ mod tests {
 
     #[test]
     fn tooltip_lists_every_account_and_marks_the_active_one() {
-        let tip = tooltip(Some(&fixtures::two_providers()), &Preferences::default(), fixtures::now());
+        let tip = tooltip(Some(&fixtures::two_providers()), &Preferences::default(), true, fixtures::now());
         let lines: Vec<&str> = tip.lines().collect();
         assert_eq!(lines[0], "Work (active) - Session 97% used, resets in 1h 2m; Weekly 16% used, resets in 3d 4h");
         assert!(lines[1].starts_with("me@example.com - Session 20% used"));
         assert!(lines[2].starts_with("me@example.com (active) - "));
-        assert_eq!(tooltip(None, &Preferences::default(), fixtures::now()), "Switch");
+        assert_eq!(tooltip(None, &Preferences::default(), false, fixtures::now()), "Switch");
+    }
+
+    #[test]
+    fn tooltip_respects_usage_shown_left_and_degraded_states() {
+        let mut prefs = Preferences::default();
+        prefs.usage_shown = UsageShown::Left;
+        let tip = tooltip(Some(&fixtures::several_accounts()), &prefs, false, fixtures::now());
+        let lines: Vec<&str> = tip.lines().collect();
+        assert!(lines[0].contains("Session 3% left"));
+        assert!(lines.iter().any(|line| line.starts_with("Side project (stale)")));
+        assert!(lines.iter().any(|line| line == &"old@example.com (signed out)"));
+        assert!(lines.iter().any(|line| line.starts_with("Spare (paused)")));
+        assert_eq!(lines.last(), Some(&"Server offline"));
+
+        let preview = tray_preview_tooltips(&fixtures::two_providers(), &prefs, fixtures::now());
+        assert_eq!(preview.len(), 2);
+        assert!(preview[0][0].starts_with("Work (active) - Session 3% left"));
     }
 
     #[test]
@@ -181,7 +235,7 @@ mod tests {
         preferences.set_account(Place::Panel, "a2", false);
         let groups = tray_groups(Some(&snapshot), &preferences);
         assert_eq!(groups[0].columns, [column(&["97%", "16%"], true)]);
-        assert!(!tooltip(Some(&snapshot), &preferences, fixtures::now()).contains("20% used"));
+        assert!(!tooltip(Some(&snapshot), &preferences, true, fixtures::now()).contains("20% used"));
         let menu_ids = |preferences: &Preferences| {
             let items = menu(Some(&snapshot), preferences, true);
             let checks = items.into_iter().filter_map(|item| match item {
@@ -194,7 +248,7 @@ mod tests {
         preferences.set_provider(Place::MenuBar, "claude", false);
         preferences.set_account(Place::MenuBar, "c1", false);
         assert_eq!(tray_groups(Some(&snapshot), &preferences), tray_groups(None, &preferences));
-        assert_eq!(tooltip(Some(&snapshot), &preferences, fixtures::now()), "Switch");
+        assert_eq!(tooltip(Some(&snapshot), &preferences, true, fixtures::now()), "Switch");
     }
 
     #[test]
