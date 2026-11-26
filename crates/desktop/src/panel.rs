@@ -8,8 +8,8 @@ use anyhow::Result;
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use rune::{
-    AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LoopSpec, Phase, PopupItem, PopupMenu, ScrollSpec, TextEdit,
-    TextStyle, col, color, el, icon, oklch, oklcha, row, text, text_input,
+    AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, LoopSpec, Phase, PopupItem, PopupMenu, ScrollSpec,
+    Shape, TextEdit, TextStyle, canvas, col, color, el, icon, oklch, oklcha, row, text, text_input,
 };
 use switch_client::{Client, oauth};
 use switch_protocol::{
@@ -23,7 +23,7 @@ use crate::format::{self, Severity, Tone};
 use crate::icons;
 use crate::launch_at_login;
 use crate::notify;
-use crate::preferences::{self, AccountScope, Preferences, ResetTrigger, UsageShown, WindowScope};
+use crate::preferences::{self, AccountScope, Preferences, ResetTrigger, UsageShown, UsageStyle, WindowScope};
 use crate::reorder::{self, List, Reorder};
 use crate::settings::{self, Page};
 
@@ -625,6 +625,9 @@ impl Panel {
             "notify-windows:all" => self.edit_preferences(|all| all.notifications.windows = WindowScope::All),
             "notify-accounts:all" => self.edit_preferences(|all| all.notifications.accounts = AccountScope::All),
             "notify-accounts:active" => self.edit_preferences(|all| all.notifications.accounts = AccountScope::Active),
+            "usage-style:bars" => self.edit_preferences(|all| all.usage_style = UsageStyle::Bars),
+            "usage-style:rings" => self.edit_preferences(|all| all.usage_style = UsageStyle::Rings),
+            "usage-style:pills" => self.edit_preferences(|all| all.usage_style = UsageStyle::Pills),
             "usage-shown:used" => self.edit_preferences(|all| all.usage_shown = UsageShown::Used),
             "usage-shown:left" => self.edit_preferences(|all| all.usage_shown = UsageShown::Left),
             "quit" => {
@@ -670,6 +673,7 @@ pub struct Palette {
     pub button_border: Color,
     pub accent: Color,
     pub on_accent: Color,
+    pub good: Color,
     pub warning: Color,
     pub danger: Color,
 }
@@ -695,6 +699,7 @@ fn palette(dark: bool) -> Palette {
         button_border: ink(0.08, 0.15),
         accent: themed("#4796ff", "#1f6fe0"),
         on_accent: oklch(1.0, 0.0, 0.0),
+        good: themed("#5bd07a", "#1f8a3d"),
         warning: themed("#f2a33c", "#b85f00"),
         danger: themed("#ff6f66", "#d0342c"),
     }
@@ -725,6 +730,10 @@ pub const SMALL: TextStyle = TextStyle::new(11.0, 400.0);
 const ACTIVE: TextStyle = TextStyle::new(11.0, 500.0);
 const PERCENT: TextStyle = TextStyle::new(12.0, 600.0).features("'tnum' 1");
 const RESET: TextStyle = TextStyle::new(11.0, 400.0).features("'tnum' 1");
+const BADGE: TextStyle = TextStyle::new(11.0, 500.0).features("'tnum' 1");
+const RING_PERCENT: TextStyle = TextStyle::new(12.0, 400.0).features("'tnum' 1");
+const RING: f32 = 14.0;
+const RING_BOX: f32 = 16.0;
 const BUTTON: TextStyle = TextStyle::new(12.0, 500.0);
 const DIMMED: f32 = 0.5;
 pub const DISABLED: f32 = 0.45;
@@ -1036,8 +1045,13 @@ fn account_row(account: &Account, provider: &ProviderState, panel: &Panel, palet
     }
     if let Some(usage) = account.usage.as_ref().filter(|usage| !usage.windows.is_empty()) {
         let current = account.status == AccountStatus::Ready && account.enabled && panel.connected;
-        block =
-            block.child(col().children(usage.windows.iter().map(|window| usage_row(window, current, panel, palette))));
+        let gap = match panel.preferences.usage_style {
+            UsageStyle::Bars => 0.0,
+            UsageStyle::Rings => 8.0,
+            UsageStyle::Pills => 12.0,
+        };
+        let rows = usage.windows.iter().map(|window| usage_row(window, current, panel, palette));
+        block = block.child(col().gap(gap).children(rows));
     }
     let available_resets: Vec<&LimitReset> = account.resets.iter().filter(|reset| reset.available(panel.now)).collect();
     if !signed_out && !available_resets.is_empty() {
@@ -1313,6 +1327,11 @@ impl Meter<'_> {
     fn pace(&self, panel: &Panel) -> Option<f64> {
         format::pace(self.window, panel.now).map(|pace| if self.left { 1.0 - pace } else { pace })
     }
+
+    fn resets(&self, panel: &Panel) -> Option<String> {
+        let reset = format::reset_time(self.window, panel.now, &panel.zone, panel.exact_resets)?;
+        Some(if panel.exact_resets { reset } else { format!("Resets in {reset}") })
+    }
 }
 
 fn usage_row(window: &UsageWindow, current: bool, panel: &Panel, palette: &Palette) -> El {
@@ -1320,7 +1339,11 @@ fn usage_row(window: &UsageWindow, current: bool, panel: &Panel, palette: &Palet
     let left = panel.preferences.usage_shown == UsageShown::Left;
     let shown = used.map(|used| if left { 100.0 - used } else { used });
     let meter = Meter { window, used, shown, left, opacity: if current { 1.0 } else { DIMMED } };
-    bar_row(&meter, panel, palette)
+    match panel.preferences.usage_style {
+        UsageStyle::Bars => bar_row(&meter, panel, palette),
+        UsageStyle::Rings => ring_row(&meter, panel, palette),
+        UsageStyle::Pills => pill_row(&meter, panel, palette),
+    }
 }
 
 fn pace_tick(pace: f64, palette: &Palette) -> El {
@@ -1354,6 +1377,99 @@ fn bar_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
         .child(bar)
         .child(right(36.0, text(format::percent(meter.shown)).font(PERCENT).color(percent_color).nowrap()))
         .child(right(74.0, text(reset).font(RESET).color(palette.secondary).nowrap()))
+}
+
+fn pill_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
+    let mut top = row()
+        .gap(6.0)
+        .center_y()
+        .child(text(&meter.window.label).font(SECTION).color(palette.text).truncate().shrink().min_w(0.0));
+    let mut bar = meter.progress(row().w_full().h(6.0).opacity(meter.opacity));
+    match (meter.used, meter.shown) {
+        (Some(used), Some(shown)) => {
+            let color = palette.severity(used, palette.good);
+            let label = format!("{} {}", format::percent(Some(shown)), meter.amount());
+            top = top.child(
+                row()
+                    .px(5.0)
+                    .py(1.0)
+                    .radius(4.0)
+                    .fill(color.alpha(0.12))
+                    .border(1.0, color.alpha(0.3))
+                    .opacity(meter.opacity)
+                    .child(text(label).font(BADGE).color(color).nowrap()),
+            );
+            let segment = || el().h_full().radius(3.0);
+            if shown > 0.0 {
+                bar = bar.child(segment().w_frac((shown / 100.0) as f32).min_w(6.0).fill(color));
+            }
+            if shown < 100.0 {
+                let track = segment().grow(1.0).min_w(0.0).fill(palette.track);
+                bar = bar.child(if shown > 0.0 { track.ml(3.0) } else { track });
+            }
+        }
+        _ => {
+            top = top.child(text("No data").font(RESET).color(palette.secondary).nowrap());
+            bar = bar.child(el().w_full().h_full().radius(3.0).fill(palette.track));
+        }
+    }
+    if let Some(pace) = meter.pace(panel) {
+        bar = bar.child(pace_tick(pace, palette));
+    }
+    let reset = meter.resets(panel).or_else(|| (meter.used == Some(0.0)).then(|| "Not used yet".to_owned()));
+    top = top.child(el().grow(1.0));
+    if let Some(reset) = reset {
+        top = top.child(text(reset).font(RESET).color(palette.secondary).nowrap());
+    }
+    col().gap(7.0).child(top).child(bar)
+}
+
+fn ring_row(meter: &Meter, panel: &Panel, palette: &Palette) -> El {
+    let mut info =
+        col().grow(1.0).min_w(0.0).gap(2.0).child(text(&meter.window.label).font(BODY).color(palette.text).truncate());
+    if let Some(reset) = meter.resets(panel) {
+        info = info.child(text(reset).font(RESET).color(palette.secondary).truncate());
+    }
+    let (label, arc) = match (meter.used, meter.shown) {
+        (Some(used), Some(shown)) => {
+            let label = format!("{} {}", format::percent(Some(shown)), meter.amount());
+            (label, Some((shown, palette.severity(used, palette.good))))
+        }
+        _ => ("No data".to_owned(), None),
+    };
+    let ring = canvas(ring(arc, meter.pace(panel), palette)).size(RING_BOX, RING_BOX);
+    let ring = meter.progress(el().size(RING_BOX, RING_BOX).opacity(meter.opacity)).child(ring);
+    row().gap(8.0).center_y().child(info).child(
+        row().gap(6.0).center_y().child(text(label).font(RING_PERCENT).color(palette.secondary).nowrap()).child(ring),
+    )
+}
+
+fn ring(arc: Option<(f64, Color)>, pace: Option<f64>, palette: &Palette) -> Shape {
+    let center = RING_BOX / 2.0;
+    let (outer, inner) = (RING / 2.0, RING / 2.0 * 0.72);
+    let (radius, width) = ((outer + inner) / 2.0, outer - inner);
+    let point = |fraction: f64, distance: f32| {
+        let angle = fraction as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        [center + distance * angle.cos(), center + distance * angle.sin()]
+    };
+    let (top, bottom) = (center - radius, center + radius);
+    let circle =
+        format!("M{center} {top} A{radius} {radius} 0 1 1 {center} {bottom} A{radius} {radius} 0 1 1 {center} {top} Z");
+    let mut shape = Shape::new().stroke_svg(&circle, width, LineCap::Butt, palette.track);
+    match arc {
+        Some((shown, color)) if shown >= 100.0 => shape = shape.stroke_svg(&circle, width, LineCap::Butt, color),
+        Some((shown, color)) if shown > 0.0 => {
+            let [x, y] = point(shown / 100.0, radius);
+            let large = if shown > 50.0 { 1 } else { 0 };
+            let path = format!("M{center} {top} A{radius} {radius} 0 {large} 1 {x} {y}");
+            shape = shape.stroke_svg(&path, width, LineCap::Butt, color);
+        }
+        _ => {}
+    }
+    match pace {
+        Some(pace) => shape.line(point(pace, inner - 1.0), point(pace, outer + 1.0), 1.5, LineCap::Butt, palette.pace),
+        None => shape,
+    }
 }
 
 fn right(width: f32, child: El) -> El {
@@ -1632,7 +1748,11 @@ mod tests {
     fn usage_display_menus_work_while_offline() {
         let mut panel = on_page(Page::Settings);
         panel.apply(Update::Lost("gone".into()));
+        panel.on_menu("usage-style:rings");
         panel.on_menu("usage-shown:left");
+        assert_eq!(panel.preferences.usage_style, UsageStyle::Rings);
         assert_eq!(panel.preferences.usage_shown, UsageShown::Left);
+        panel.on_menu("usage-style:pills");
+        assert_eq!(panel.preferences.usage_style, UsageStyle::Pills);
     }
 }

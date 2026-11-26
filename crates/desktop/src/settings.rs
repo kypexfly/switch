@@ -8,7 +8,7 @@ use crate::panel::{
     dismissible_notice, drag_handle, empty, movable, note, notice, remove_button, sign_in_button, sign_in_hint, toggle,
 };
 use crate::preferences::{
-    AccountScope, NotificationPreferences, Place, ResetTrigger, UsageShown, WindowScope, provider_windows,
+    AccountScope, NotificationPreferences, Place, ResetTrigger, UsageShown, UsageStyle, WindowScope, provider_windows,
 };
 use crate::reorder::List;
 use crate::status::{self, TrayGroup};
@@ -130,6 +130,14 @@ fn list(panel: &Panel, snapshot: &Snapshot, palette: &Palette) -> Vec<El> {
     items
 }
 
+fn usage_style_label(style: UsageStyle) -> &'static str {
+    match style {
+        UsageStyle::Bars => "Bars",
+        UsageStyle::Rings => "Rings",
+        UsageStyle::Pills => "Pills",
+    }
+}
+
 fn usage_shown_label(shown: UsageShown) -> &'static str {
     match shown {
         UsageShown::Used => "Used",
@@ -138,6 +146,16 @@ fn usage_shown_label(shown: UsageShown) -> &'static str {
 }
 
 fn usage_display(panel: &Panel, palette: &Palette) -> El {
+    let style = panel.preferences.usage_style;
+    let style_button = menu_button("usage-style", usage_style_label(style), "Usage style", true, palette, move || {
+        let item = |id: &str, choice: UsageStyle| {
+            PopupItem::new(format!("usage-style:{id}"), usage_style_label(choice)).checked(style == choice)
+        };
+        PopupMenu::new()
+            .item(item("bars", UsageStyle::Bars))
+            .item(item("rings", UsageStyle::Rings))
+            .item(item("pills", UsageStyle::Pills))
+    });
     let shown = panel.preferences.usage_shown;
     let shown_button =
         menu_button("usage-shown", usage_shown_label(shown), "Show usage as", true, palette, move || {
@@ -146,7 +164,11 @@ fn usage_display(panel: &Panel, palette: &Palette) -> El {
             };
             PopupMenu::new().item(item("used", UsageShown::Used)).item(item("left", UsageShown::Left))
         });
-    group(palette).child(setting("Show usage as", shown_button, palette))
+    group(palette).child(setting("Usage style", style_button, palette)).child(divider(palette)).child(setting(
+        "Show usage as",
+        shown_button,
+        palette,
+    ))
 }
 
 fn auto_switch_row(snapshot: &Snapshot, palette: &Palette) -> El {

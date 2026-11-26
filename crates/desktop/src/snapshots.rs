@@ -5,7 +5,7 @@ use rune::App;
 use crate::connection::Update;
 use crate::fixtures;
 use crate::panel::{Panel, Prompt, Task};
-use crate::preferences::{Place, Preferences, UsageShown};
+use crate::preferences::{Place, Preferences, UsageShown, UsageStyle};
 use crate::reorder::{List, Reorder};
 use crate::settings::Page;
 use crate::status::{self, TrayColumn, TrayGroup};
@@ -54,7 +54,7 @@ fn viewport_height(tree: &str) -> f32 {
     numbers.split(',').nth(1).unwrap().trim().parse().unwrap()
 }
 
-fn showcase(shown: UsageShown) -> Panel {
+fn showcase(style: UsageStyle, shown: UsageShown) -> Panel {
     let mut snapshot = fixtures::showcase();
     let accounts = &mut snapshot.providers[0].accounts;
     let weekly = &mut accounts[0].usage.as_mut().unwrap().windows[1];
@@ -62,6 +62,7 @@ fn showcase(shown: UsageShown) -> Panel {
     weekly.period_seconds = Some(30 * 86400);
     accounts[2].usage.as_mut().unwrap().windows[0].used_percent = None;
     let mut panel = panel(Some(snapshot));
+    panel.preferences.usage_style = style;
     panel.preferences.usage_shown = shown;
     panel
 }
@@ -333,7 +334,14 @@ fn render_snapshots() {
         );
         snap(&dir, "scrolling", || Panel { max_height: 360.0, ..panel(Some(fixtures::several_accounts())) }, dark);
         snap(&dir, "showcase", || panel(Some(fixtures::showcase())), dark);
-        snap(&dir, "showcase-bars-left", || showcase(UsageShown::Left), dark);
+        snap(&dir, "showcase-bars-left", || showcase(UsageStyle::Bars, UsageShown::Left), dark);
+        snap(&dir, "showcase-rings-used", || showcase(UsageStyle::Rings, UsageShown::Used), dark);
+        snap(&dir, "showcase-rings-left", || showcase(UsageStyle::Rings, UsageShown::Left), dark);
+        snap(&dir, "showcase-pills-used", || showcase(UsageStyle::Pills, UsageShown::Used), dark);
+        snap(&dir, "showcase-pills-left", || showcase(UsageStyle::Pills, UsageShown::Left), dark);
+        let exact = |style| move || Panel { exact_resets: true, ..showcase(style, UsageShown::Used) };
+        snap(&dir, "showcase-rings-exact", exact(UsageStyle::Rings), dark);
+        snap(&dir, "showcase-pills-exact", exact(UsageStyle::Pills), dark);
         snap(&dir, "resets-collapsed", || panel(Some(fixtures::with_resets())), dark);
         snap(
             &dir,

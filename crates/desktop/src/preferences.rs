@@ -35,6 +35,15 @@ pub enum AccountScope {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum UsageStyle {
+    #[default]
+    Bars,
+    Rings,
+    Pills,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UsageShown {
     #[default]
     Used,
@@ -128,6 +137,7 @@ pub struct Preferences {
     tray_windows: BTreeMap<String, Vec<String>>,
     #[serde(deserialize_with = "deserialize_notifications")]
     pub notifications: NotificationPreferences,
+    pub usage_style: UsageStyle,
     pub usage_shown: UsageShown,
 }
 
@@ -383,18 +393,22 @@ mod tests {
     }
 
     #[test]
-    fn usage_shown_defaults_to_used_and_round_trips() {
+    fn usage_display_defaults_to_used_bars_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = path(dir.path());
         fs::write(&path, r#"{"notifications": true}"#).unwrap();
-        assert_eq!(load(&path).unwrap().usage_shown, UsageShown::Used);
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.usage_style, UsageStyle::Bars);
+        assert_eq!(loaded.usage_shown, UsageShown::Used);
 
-        fs::write(&path, r#"{"usage_shown": "left"}"#).unwrap();
-        assert_eq!(load(&path).unwrap().usage_shown, UsageShown::Left);
+        fs::write(&path, r#"{"usage_style": "pills", "usage_shown": "left"}"#).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.usage_style, UsageStyle::Pills);
+        assert_eq!(loaded.usage_shown, UsageShown::Left);
 
-        let preferences = Preferences { usage_shown: UsageShown::Left, ..Preferences::default() };
+        let preferences = Preferences { usage_style: UsageStyle::Rings, ..Preferences::default() };
         save(&path, &preferences).unwrap();
-        assert!(fs::read_to_string(&path).unwrap().contains(r#""usage_shown": "left""#));
+        assert!(fs::read_to_string(&path).unwrap().contains(r#""usage_style": "rings""#));
         assert_eq!(load(&path).unwrap(), preferences);
     }
 }
