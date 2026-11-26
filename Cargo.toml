@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/kypexfly/switch"
+
+[workspace.dependencies]
+switch-protocol = { path = "crates/protocol" }
+switch-client = { path = "crates/client" }
+switch-core = { path = "crates/core" }
+switch-server = { path = "crates/server" }
+switch-tui = { path = "crates/tui" }
+anyhow = "1"
+jiff = { version = "0.2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+thiserror = "2"
+ureq = { version = "3", features = ["json"] }
+utoipa = "5"
+opentui = "=0.9.9"
+rune = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "e3d3975756215e32a6951d4fdc66a60aab496819" }
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

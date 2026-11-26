@@ -1,0 +1,19 @@
+[package]
+name = "switch-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+switch-protocol.workspace = true
+anyhow.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+base64 = "0.22"
+form_urlencoded = "1"
+sha2 = "0.10"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }

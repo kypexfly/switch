@@ -1,0 +1,5 @@
+/target
+/vendor/opentui-native
+/dist
+.DS_Store
+/design

@@ -1,0 +1,49 @@
+[package]
+name = "switch-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+switch-client.workspace = true
+switch-protocol.workspace = true
+anyhow.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target."cfg(target_os = \"macos\")".dependencies]
+rune.workspace = true
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAttributedString", "NSBundle", "NSDictionary", "NSError", "NSGeometry", "NSString", "NSUUID"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSAttributedString",
+    "NSBezierPath",
+    "NSBitmapImageRep",
+    "NSColor",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImageRep",
+    "NSScreen",
+    "NSStatusBar",
+    "NSStringDrawing",
+] }
+
+[target."cfg(target_os = \"macos\")".dev-dependencies]
+png = "0.18"
+tempfile = "3"

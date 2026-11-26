@@ -1,0 +1,10 @@
+[Unit]
+Description=Switch server
+After=network.target
+
+[Service]
+ExecStart=%h/.local/bin/swx serve --port 4590 --no-auth
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
