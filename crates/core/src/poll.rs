@@ -35,6 +35,7 @@ pub struct Schedule {
     pub next_at: Option<Timestamp>,
     pub interval: Option<f64>,
     pub limited_at: Option<Timestamp>,
+    pub rate_limited_until: Option<Timestamp>,
     pub failures: u32,
 }
 
@@ -48,6 +49,17 @@ impl Schedule {
         let fresh = fetched_at.is_some_and(|fetched_at| seconds(now, fetched_at) < FRESH_SECS);
         let backing_off = self.failures > 0 && !self.due(now);
         !fresh && !backing_off
+    }
+
+    pub fn clear_failure_backoff(&mut self, now: Timestamp) {
+        if self.failures == 0 {
+            return;
+        }
+        if self.rate_limited_until.is_some_and(|until| now < until) {
+            return;
+        }
+        self.failures = 0;
+        self.next_at = None;
     }
 
     pub(crate) fn recently_limited(&self, now: Timestamp) -> bool {
@@ -93,6 +105,7 @@ pub fn after_success(schedule: &mut Schedule, fetched: Fetched, now: Timestamp, 
     }
     schedule.next_at = Some(next_at);
     schedule.interval = Some(interval);
+    schedule.rate_limited_until = None;
     schedule.failures = 0;
 }
 
@@ -108,7 +121,11 @@ pub fn after_failure(schedule: &mut Schedule, rate_limited: bool, retry_after: O
         Some(asked) => computed.max(asked).min(LONG_BLOCK_CAP),
         None => computed,
     };
-    schedule.next_at = Some(after(now, wait));
+    let next_at = after(now, wait);
+    if rate_limited {
+        schedule.rate_limited_until = Some(next_at);
+    }
+    schedule.next_at = Some(next_at);
 }
 
 /// Windows that just rose into the band below the switch line; a window that fell into it rolled over.
@@ -267,5 +284,36 @@ mod tests {
 
         usage[1].resets_at = Some(after(now(), -5.0));
         assert_eq!(current_peak(&usage, now()), None);
+    }
+
+    #[test]
+    fn clear_failure_backoff_resets_ordinary_failures_but_honors_active_rate_limits() {
+        let mut schedule = Schedule::default();
+        after_failure(&mut schedule, false, None, now());
+        assert_eq!(schedule.failures, 1);
+        assert!(!schedule.due(now()));
+        assert!(!schedule.due_on_request(None, now()));
+
+        schedule.clear_failure_backoff(now());
+        assert_eq!(schedule.failures, 0);
+        assert_eq!(schedule.next_at, None);
+        assert!(schedule.due(now()));
+        assert!(schedule.due_on_request(None, now()));
+
+        let normal_next = after(now(), 300.0);
+        schedule.next_at = Some(normal_next);
+        schedule.clear_failure_backoff(now());
+        assert_eq!(schedule.next_at, Some(normal_next));
+
+        after_failure(&mut schedule, true, Some(300.0), now());
+        assert_eq!(schedule.failures, 1);
+        schedule.clear_failure_backoff(after(now(), 60.0));
+        assert_eq!(schedule.failures, 1);
+        assert!(!schedule.due(after(now(), 60.0)));
+
+        schedule.clear_failure_backoff(after(now(), 301.0));
+        assert_eq!(schedule.failures, 0);
+        assert_eq!(schedule.next_at, None);
+        assert!(schedule.recently_limited(after(now(), 301.0)));
     }
 }

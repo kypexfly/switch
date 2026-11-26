@@ -109,6 +109,7 @@ struct State {
     saved: Saved,
     live: BTreeMap<&'static str, Identity>,
     live_cache: HashMap<&'static str, (Option<Login>, Instant)>,
+    live_secrets: HashMap<String, String>,
     problems: BTreeMap<String, String>,
     schedules: HashMap<String, Schedule>,
     target_backoffs: HashMap<String, SwitchBackoff>,
@@ -123,6 +124,7 @@ impl Engine {
             saved,
             live: BTreeMap::new(),
             live_cache: HashMap::new(),
+            live_secrets: HashMap::new(),
             problems: BTreeMap::new(),
             schedules: HashMap::new(),
             target_backoffs: HashMap::new(),
@@ -222,12 +224,18 @@ impl Engine {
                         .find(|account| account.provider == provider.id() && same(&login.identity, &account.identity))
                         .cloned();
                     state.live.insert(provider.id(), login.identity);
-                    state.problems.remove(provider.id());
+                    let recovered_live = state.problems.remove(provider.id()).is_some();
                     if let Some(account) = matched {
-                        match state.saved.last_live.get(provider.id()).map(String::as_str) {
+                        let secret_digest = crate::provider::digest(login.secret.expose());
+                        let secret_changed = state
+                            .live_secrets
+                            .insert(account.id.clone(), secret_digest.clone())
+                            .is_some_and(|previous| previous != secret_digest);
+                        let became_live = match state.saved.last_live.get(provider.id()).map(String::as_str) {
                             None => {
-                                state.saved.last_live.insert(provider.id().to_owned(), account.id);
+                                state.saved.last_live.insert(provider.id().to_owned(), account.id.clone());
                                 changed = true;
+                                false
                             }
                             Some(previous) if previous != account.id => {
                                 state.saved.last_live.insert(provider.id().to_owned(), account.id.clone());
@@ -236,8 +244,14 @@ impl Engine {
                                 state.problems.remove(&auto_switch_problem_key(provider.id()));
                                 record_manual_hold(&mut state.saved, provider.id(), &account, now);
                                 changed = true;
+                                true
                             }
-                            Some(_) => {}
+                            Some(_) => false,
+                        };
+                        if (secret_changed || recovered_live || became_live)
+                            && let Some(schedule) = state.schedules.get_mut(&account.id)
+                        {
+                            schedule.clear_failure_backoff(now);
                         }
                     }
                 }
@@ -534,6 +548,7 @@ impl Engine {
         })?;
         let mut state = self.state();
         state.schedules.remove(id);
+        state.live_secrets.remove(id);
         state.target_backoffs.remove(id);
         state.next_reset_grants.remove(id);
         Ok(())
@@ -658,6 +673,9 @@ impl Engine {
         })
         .ok();
         let mut state = self.state();
+        if let Some(schedule) = state.schedules.get_mut(&account.id) {
+            schedule.clear_failure_backoff(now);
+        }
         state.target_backoffs.remove(&account.id);
         state.provider_backoffs.remove(provider_id);
         state.problems.remove(&auto_switch_problem_key(provider_id));
@@ -3113,5 +3131,106 @@ mod tests {
         assert_eq!(provider.resets_calls.load(Ordering::SeqCst), 2);
         assert_eq!(updated.resets.len(), 1);
         assert_eq!(updated.resets[0].remaining, 1);
+    }
+
+    #[test]
+    fn renewed_live_login_clears_failure_backoff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct LiveTokenProvider {
+            demo: Demo,
+            valid_access: Mutex<String>,
+            renew_calls: AtomicUsize,
+        }
+
+        impl Provider for LiveTokenProvider {
+            fn id(&self) -> &'static str {
+                self.demo.id()
+            }
+            fn name(&self) -> &'static str {
+                self.demo.name()
+            }
+            fn live(&self) -> anyhow::Result<Option<Login>> {
+                self.demo.live()
+            }
+            fn lock(&self) -> anyhow::Result<Box<dyn std::any::Any>> {
+                self.demo.lock()
+            }
+            fn replace_live(&self, secret: &Secret) -> anyhow::Result<()> {
+                self.demo.replace_live(secret)
+            }
+            fn profile(&self, _secret: &Secret) -> Result<crate::provider::Profile, RemoteError> {
+                Ok(crate::provider::Profile {
+                    identity: Identity {
+                        account_id: "ada".into(),
+                        email: "ada@example.com".into(),
+                        organization_id: None,
+                        organization: None,
+                    },
+                    plan: Some("Pro".to_owned()),
+                })
+            }
+            fn usage(&self, secret: &Secret) -> Result<Vec<UsageWindow>, RemoteError> {
+                let expected = self.valid_access.lock().unwrap().clone();
+                let parsed: serde_json::Value = serde_json::from_str(secret.expose()).unwrap();
+                if parsed["access"].as_str() != Some(expected.as_str()) {
+                    return Err(RemoteError::Unauthorized);
+                }
+                Ok(vec![UsageWindow {
+                    id: "session".into(),
+                    label: "Session".into(),
+                    used_percent: Some(10.0),
+                    resets_at: None,
+                    primary: true,
+                    period_seconds: None,
+                }])
+            }
+            fn renew(&self, secret: &Secret) -> Result<Secret, RemoteError> {
+                self.renew_calls.fetch_add(1, Ordering::SeqCst);
+                self.demo.renew(secret)
+            }
+            fn expired(&self, _: &Secret) -> bool {
+                false
+            }
+            fn lineage(&self, secret: &Secret) -> Option<String> {
+                let parsed: serde_json::Value = serde_json::from_str(secret.expose()).ok()?;
+                parsed["refresh"].as_str().map(crate::provider::digest)
+            }
+        }
+
+        let make_login = |access: &str| Login {
+            identity: Identity {
+                account_id: "ada".into(),
+                email: "ada@example.com".into(),
+                organization_id: None,
+                organization: None,
+            },
+            secret: Secret::new(serde_json::json!({ "access": access, "refresh": "shared-rt" }).to_string()),
+        };
+
+        let provider = Arc::new(LiveTokenProvider {
+            demo: Demo::new("claude", "Claude"),
+            valid_access: Mutex::new("at-1".to_owned()),
+            renew_calls: AtomicUsize::new(0),
+        });
+        let engine = engine_with_provider(provider.clone());
+        provider.demo.set_live(Some(make_login("at-1")));
+        engine.add_account("claude").unwrap();
+        let id = engine.snapshot().providers[0].accounts[0].id.clone();
+
+        *provider.valid_access.lock().unwrap() = "at-2".to_owned();
+        engine.poll();
+        assert!(matches!(engine.account(&id).unwrap().status, AccountStatus::Stale { .. }));
+        assert_eq!(engine.state().schedules[&id].failures, 1);
+
+        engine.refresh();
+        assert!(matches!(engine.account(&id).unwrap().status, AccountStatus::Stale { .. }));
+
+        provider.demo.set_live(Some(make_login("at-2")));
+        engine.sync_live();
+        assert_eq!(engine.state().schedules[&id].failures, 0);
+        engine.poll();
+        assert_eq!(engine.account(&id).unwrap().status, AccountStatus::Ready);
+        assert_eq!(provider.renew_calls.load(Ordering::SeqCst), 0);
     }
 }

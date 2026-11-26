@@ -104,7 +104,7 @@ A provider that returns `Some` from `Provider::sign_in()` adds accounts through 
 
 ### Token renewal
 
-- **Live account**: Usage is queried with the live login and Switch never renews it, because the refresh token belongs to the provider's own tool. A `401` marks the account `stale` until the tool renews its own session.
+- **Live account**: Usage is queried with the live login and Switch never renews it, because the refresh token belongs to the provider's own tool. A `401` marks the account `stale` until the tool renews its own session. When `sync_live` observes a changed live token (or live-login recovery), non-rate-limit failure backoff is cleared so the account refreshes promptly without restarting the server.
 - **Saved (non-live) accounts**: If a saved secret is expired (for Claude, within 5 minutes of `expiresAt`) or returns `401`, Switch renews it via `Provider::renew` and writes the rotated secret to the vault before using it. An `invalid_grant` rejection marks the account `needs_login`.
 - **Signed-in accounts**: Logins from Switch's own browser sign-in (Antigravity) belong to Switch, not to the provider's tool, so renewing them is the normal saved-login path above.
 
